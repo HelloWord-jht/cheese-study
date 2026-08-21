@@ -54,7 +54,7 @@ test("exposes a dedicated container health endpoint", async () => {
 });
 
 test("includes production deployment assets", async () => {
-  const [dockerfile, compose, layout, envExample, serverDeploy, nginxHttp, nginxHttps] = await Promise.all([
+  const [dockerfile, compose, layout, envExample, serverDeploy, nginxHttp, nginxHttps, serviceWorker, dailyPlanRoute] = await Promise.all([
     readFile(new URL("Dockerfile", root), "utf8"),
     readFile(new URL("compose.yaml", root), "utf8"),
     readFile(new URL("app/layout.tsx", root), "utf8"),
@@ -62,6 +62,8 @@ test("includes production deployment assets", async () => {
     readFile(new URL("scripts/server-deploy.sh", root), "utf8"),
     readFile(new URL("deploy/nginx/cheese-study.http.conf.template", root), "utf8"),
     readFile(new URL("deploy/nginx/cheese-study.https.conf.template", root), "utf8"),
+    readFile(new URL("public/sw.js", root), "utf8"),
+    readFile(new URL("app/api/daily-plan/route.ts", root), "utf8"),
   ]);
 
   assert.match(dockerfile, /USER appuser/);
@@ -77,11 +79,19 @@ test("includes production deployment assets", async () => {
   assert.match(serverDeploy, /systemctl reload nginx/);
   assert.match(nginxHttp, /proxy_pass http:\/\/127\.0\.0\.1:__APP_PORT__/);
   assert.match(nginxHttps, /Strict-Transport-Security/);
+  assert.match(nginxHttp, /add_header Content-Type audio\/mpeg always/);
+  assert.match(nginxHttps, /add_header Content-Type audio\/mpeg always/);
+  assert.match(serviceWorker, /"audio"/);
+  assert.match(dailyPlanRoute, /selectionReason/);
+  assert.match(dailyPlanRoute, /offlineMissionId/);
+  assert.match(dailyPlanRoute, /thinking: \{ type: "disabled" \}/);
 
   for (const script of ["scripts/deploy.sh", "scripts/server-deploy.sh"]) {
     const syntax = spawnSync("sh", ["-n", fileURLToPath(new URL(script, root))], { encoding: "utf8" });
     assert.equal(syntax.status, 0, `${script}: ${syntax.stderr}`);
   }
+  const generatorSyntax = spawnSync(process.execPath, ["--check", fileURLToPath(new URL("scripts/generate-speech-assets.mjs", root))], { encoding: "utf8" });
+  assert.equal(generatorSyntax.status, 0, generatorSyntax.stderr);
 
   await access(new URL("public/og.png", root));
   await access(new URL("public/favicon.png", root));
@@ -104,6 +114,11 @@ test("ships 45 curated activities and all milestone-one interactions", async () 
   for (const interaction of ["tap_count", "drag_match", "drag_sort", "place_in_scene", "sequence_3", "pattern_extend", "story_choice"]) {
     assert.match(milestoneSource, new RegExp(`kind: "${interaction}"`));
   }
+
+  const activityIds = [baseSource, milestoneSource]
+    .flatMap((source) => [...source.matchAll(/^    id: "([a-z0-9-]+)",$/gm)].map((match) => match[1]));
+  assert.equal(activityIds.length, 45);
+  await Promise.all(activityIds.map((id) => access(new URL(`public/audio/instructions/${id}.mp3`, root))));
 });
 
 test("daily plans keep one activity per subject and vary interaction templates", async () => {

@@ -1,4 +1,4 @@
-const CACHE_NAME = "cheese-study-v2";
+const CACHE_NAME = "cheese-study-v3";
 const APP_SHELL = ["/", "/favicon.png", "/pwa-192.png", "/pwa-512.png"];
 
 self.addEventListener("install", (event) => {
@@ -35,7 +35,7 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  if (["style", "script", "image", "font"].includes(request.destination)) {
+  if (["style", "script", "image", "font", "audio"].includes(request.destination)) {
     event.respondWith(
       caches.match(request).then(
         (cached) =>

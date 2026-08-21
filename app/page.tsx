@@ -88,8 +88,17 @@ import {
 } from "../lib/learning";
 
 type View = "today" | "treasure" | "parent";
-type AiInfo = { configured: boolean; used: boolean; model: string; reason?: string };
+type AiInfo = {
+  configured: boolean;
+  used: boolean;
+  model: string;
+  reason?: string;
+  selectionReason?: string;
+  parentInsight?: string;
+  offlineMission?: string;
+};
 type DragVisual = { id: string; x: number; y: number; moved: boolean };
+type NarrationState = "idle" | "playing" | "error";
 
 const DRAG_TEMPLATES = new Set<ActivityTemplate>([
   "drag_match",
@@ -293,6 +302,7 @@ export default function HomePage() {
   const [selectedPieceId, setSelectedPieceId] = useState<string | null>(null);
   const [dragVisual, setDragVisual] = useState<DragVisual | null>(null);
   const [audioReplayCount, setAudioReplayCount] = useState(0);
+  const [narrationState, setNarrationState] = useState<NarrationState>("idle");
   const [gateOpen, setGateOpen] = useState(false);
   const [gateHolding, setGateHolding] = useState(false);
   const [toast, setToast] = useState("");
@@ -300,6 +310,8 @@ export default function HomePage() {
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const startedAt = useRef(Date.now());
   const dragStart = useRef<{ id: string; x: number; y: number; pointerId: number; moved: boolean } | null>(null);
+  const instructionAudio = useRef<HTMLAudioElement | null>(null);
+  const availableVoices = useRef<SpeechSynthesisVoice[]>([]);
 
   const todayResults = useMemo(
     () => results.filter((result) => result.date === dateKey),
@@ -371,6 +383,16 @@ export default function HomePage() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  useEffect(() => {
+    if (!("speechSynthesis" in window)) return;
+    const loadVoices = () => {
+      availableVoices.current = window.speechSynthesis.getVoices();
+    };
+    loadVoices();
+    window.speechSynthesis.addEventListener("voiceschanged", loadVoices);
+    return () => window.speechSynthesis.removeEventListener("voiceschanged", loadVoices);
+  }, []);
+
   async function requestDailyPlan(force = false) {
     setPlanLoading(true);
     const fallback = createCuratedPlan(dateKey, profile.interests);
@@ -403,14 +425,89 @@ export default function HomePage() {
     }
   }
 
-  function speak(text: string, lang: "zh-CN" | "en-US" = "zh-CN", interrupt = true) {
-    if (!profile.soundOn || !("speechSynthesis" in window)) return;
-    if (interrupt) window.speechSynthesis.cancel();
+  function stopNarration(updateState = true) {
+    const audio = instructionAudio.current;
+    if (audio) {
+      audio.onplaying = null;
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
+      audio.currentTime = 0;
+      instructionAudio.current = null;
+    }
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    if (updateState) setNarrationState("idle");
+  }
+
+  function speak(
+    text: string,
+    lang: "zh-CN" | "en-US" = "zh-CN",
+    interrupt = true,
+    force = false,
+  ) {
+    if ((!profile.soundOn && !force) || !("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+      if (force) {
+        setNarrationState("error");
+        setToast("当前浏览器没有可用语音，请检查媒体音量");
+      }
+      return;
+    }
+    if (interrupt) stopNarration(false);
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = lang;
     utterance.rate = lang === "en-US" ? 0.76 : 0.84;
     utterance.pitch = 1.05;
+    const wantedLanguage = lang.toLowerCase();
+    utterance.voice = availableVoices.current.find((voice) => voice.lang.toLowerCase() === wantedLanguage)
+      ?? availableVoices.current.find((voice) => voice.lang.toLowerCase().startsWith(wantedLanguage.split("-")[0]))
+      ?? null;
+    utterance.onstart = () => setNarrationState("playing");
+    utterance.onend = () => setNarrationState("idle");
+    utterance.onerror = (event) => {
+      if (event.error === "canceled" || event.error === "interrupted") return;
+      setNarrationState("error");
+      setToast("语音启动失败，请确认手机没有静音");
+    };
+    window.speechSynthesis.resume();
     window.speechSynthesis.speak(utterance);
+  }
+
+  function playInstruction(activity: LearningActivity, force = false) {
+    if (!profile.soundOn && !force) return;
+    stopNarration(false);
+    setNarrationState("playing");
+
+    const audio = new Audio(`/audio/instructions/${activity.id}.mp3`);
+    audio.preload = "auto";
+    audio.volume = 1;
+    instructionAudio.current = audio;
+    let fallbackStarted = false;
+    const fallbackToDeviceVoice = () => {
+      if (fallbackStarted) return;
+      fallbackStarted = true;
+      instructionAudio.current = null;
+      speak(activity.spokenInstruction, activity.speechLang, true, true);
+    };
+    audio.onplaying = () => setNarrationState("playing");
+    audio.onended = () => {
+      instructionAudio.current = null;
+      setNarrationState("idle");
+    };
+    audio.onerror = fallbackToDeviceVoice;
+    const playback = audio.play();
+    if (playback) void playback.catch(fallbackToDeviceVoice);
+  }
+
+  function toggleSound() {
+    if (profile.soundOn) {
+      stopNarration();
+      setProfile((current) => ({ ...current, soundOn: false }));
+      setToast("语音已关闭");
+      return;
+    }
+    setProfile((current) => ({ ...current, soundOn: true }));
+    setToast("语音已打开");
+    if (activeActivity && !activityComplete) playInstruction(activeActivity, true);
   }
 
   function saveActivityResult(record: ActivityResult) {
@@ -458,7 +555,8 @@ export default function HomePage() {
   }
 
   function startActivity(activity: LearningActivity) {
-    setActiveActivity(withSessionVariant(activity));
+    const preparedActivity = withSessionVariant(activity);
+    setActiveActivity(preparedActivity);
     setAttempts(0);
     setWrongChoiceId(null);
     setRevealedAnswer(false);
@@ -469,13 +567,17 @@ export default function HomePage() {
     setDragVisual(null);
     setAudioReplayCount(0);
     startedAt.current = Date.now();
-    window.setTimeout(() => speak(activity.spokenInstruction, activity.speechLang), 180);
+    playInstruction(preparedActivity);
   }
 
   function replayInstruction() {
     if (!activeActivity) return;
     setAudioReplayCount((count) => count + 1);
-    speak(activeActivity.spokenInstruction, activeActivity.speechLang);
+    if (!profile.soundOn) {
+      setProfile((current) => ({ ...current, soundOn: true }));
+      setToast("语音已打开");
+    }
+    playInstruction(activeActivity, true);
   }
 
   function chooseAnswer(choice: ActivityChoice) {
@@ -574,7 +676,7 @@ export default function HomePage() {
   }
 
   function closeActivity() {
-    window.speechSynthesis?.cancel();
+    stopNarration();
     if (activeActivity && !activityComplete && Date.now() - startedAt.current > 2500) {
       saveActivityResult({
         activityId: activeActivity.id,
@@ -651,6 +753,7 @@ export default function HomePage() {
 
   const firstUnfinished = plan.activities.find((activity) => !completedIds.has(activity.id)) ?? plan.activities[0];
   const activeTemplate = activeActivity ? activityTemplate(activeActivity) : null;
+  const offlineMission = aiInfo.used && aiInfo.offlineMission ? aiInfo.offlineMission : plan.parentTip;
 
   return (
     <main className={`product-shell ${profile.reduceMotion ? "reduce-motion" : ""}`}>
@@ -688,7 +791,7 @@ export default function HomePage() {
         <header className="mobile-topbar">
           <button className="mobile-brand" onClick={() => setView("today")}><Bone size={21} /></button>
           <div><small>{todayLabel()}</small><strong>{profile.name}的小世界</strong></div>
-          <button className="header-sound" onClick={() => setProfile((current) => ({ ...current, soundOn: !current.soundOn }))} aria-label={profile.soundOn ? "关闭声音" : "打开声音"}>
+          <button className="header-sound" onClick={toggleSound} aria-label={profile.soundOn ? "关闭声音" : "打开声音"}>
             {profile.soundOn ? <Volume2 size={21} /> : <VolumeX size={21} />}
           </button>
         </header>
@@ -697,7 +800,7 @@ export default function HomePage() {
           <div><span>{todayLabel()}</span><h1>{view === "today" ? "今天的探险任务" : view === "treasure" ? "探险宝箱" : "家长中心"}</h1></div>
           <div className="desktop-top-actions">
             <span className="today-time"><Clock3 size={16} /> 约 {profile.sessionMinutes} 分钟</span>
-            <button className="header-sound" onClick={() => setProfile((current) => ({ ...current, soundOn: !current.soundOn }))} aria-label={profile.soundOn ? "关闭声音" : "打开声音"}>
+            <button className="header-sound" onClick={toggleSound} aria-label={profile.soundOn ? "关闭声音" : "打开声音"}>
               {profile.soundOn ? <Volume2 size={21} /> : <VolumeX size={21} />}
             </button>
           </div>
@@ -765,8 +868,8 @@ export default function HomePage() {
 
             <section className="offscreen-mission">
               <span className="offscreen-icon"><Footprints size={25} /></span>
-              <div><small>离开屏幕的小挑战</small><strong>{plan.parentTip}</strong></div>
-              <button onClick={() => { setToast("已经帮你记住啦"); speak(plan.parentTip); }}>记住啦 <Check size={16} /></button>
+              <div><small>{aiInfo.used && aiInfo.offlineMission ? "AI 挑选的亲子挑战" : "离开屏幕的小挑战"}</small><strong>{offlineMission}</strong></div>
+              <button onClick={() => { setToast("已经帮你记住啦"); speak(offlineMission); }}>记住啦 <Check size={16} /></button>
             </section>
           </div>
         )}
@@ -832,6 +935,12 @@ export default function HomePage() {
                   <span><i />{aiInfo.used ? "智能编排已启用" : aiInfo.configured ? "正在使用安全兜底" : "尚未配置 API Key"}</span>
                   <small>{aiInfo.used ? `${aiInfo.model} 只从审核内容中选课` : "不影响使用，当前由本地课程库编排"}</small>
                 </div>
+                {aiInfo.used && (aiInfo.selectionReason || aiInfo.parentInsight) && (
+                  <div className="ai-coach-notes">
+                    {aiInfo.selectionReason && <div><small>为什么这样安排</small><p>{aiInfo.selectionReason}</p></div>}
+                    {aiInfo.parentInsight && <div><small>给家长的观察</small><p>{aiInfo.parentInsight}</p></div>}
+                  </div>
+                )}
                 <p>模型不会直接与孩子聊天，也不会生成未经审核的题目；它只根据兴趣和近期表现，从人工课程库中选择今天的三个任务。</p>
                 <button className="refresh-plan" disabled={planLoading} onClick={() => void requestDailyPlan(true)}><RefreshCw size={17} className={planLoading ? "spinning" : ""} />重新编排今天</button>
               </article>
@@ -852,7 +961,7 @@ export default function HomePage() {
               <article className="parent-panel control-panel">
                 <div className="panel-heading"><div><span>体验控制</span><h3>温和地玩，按时停下来</h3></div><Clock3 size={23} /></div>
                 <div className="control-row"><div><strong>每次使用时长</strong><small>三个任务结束后自然收尾</small></div><span>{profile.sessionMinutes} 分钟</span></div>
-                <div className="control-row"><div><strong>语音陪伴</strong><small>中英文指令和鼓励</small></div><button className={`toggle ${profile.soundOn ? "on" : ""}`} onClick={() => setProfile((current) => ({ ...current, soundOn: !current.soundOn }))} aria-label="切换语音陪伴"><i /></button></div>
+                <div className="control-row"><div><strong>语音陪伴</strong><small>中英文指令和鼓励</small></div><button className={`toggle ${profile.soundOn ? "on" : ""}`} onClick={toggleSound} aria-label="切换语音陪伴"><i /></button></div>
                 <div className="control-row"><div><strong>减少动画</strong><small>降低运动和庆祝效果</small></div><button className={`toggle ${profile.reduceMotion ? "on" : ""}`} onClick={() => setProfile((current) => ({ ...current, reduceMotion: !current.reduceMotion }))} aria-label="切换减少动画"><i /></button></div>
               </article>
             </section>
@@ -891,7 +1000,7 @@ export default function HomePage() {
             <div className="learning-progress">
               {plan.activities.map((activity) => <i key={activity.id} className={completedIds.has(activity.id) || activity.id === activeActivity.id ? "active" : ""} />)}
             </div>
-            <button onClick={() => setProfile((current) => ({ ...current, soundOn: !current.soundOn }))} aria-label="切换声音">{profile.soundOn ? <Volume2 size={23} /> : <VolumeX size={23} />}</button>
+            <button onClick={toggleSound} aria-label="切换声音">{profile.soundOn ? <Volume2 size={23} /> : <VolumeX size={23} />}</button>
           </header>
 
           {!activityComplete ? (
@@ -900,7 +1009,7 @@ export default function HomePage() {
                 <span className="learning-domain-label">{DOMAIN_META[activeActivity.domain].title}</span>
                 <small>{activeActivity.skill}</small>
                 <h2 id="learning-title">{activeActivity.instruction}</h2>
-                <button className="listen-again" onClick={replayInstruction}><Volume2 size={21} />再听一次</button>
+                <button className={`listen-again ${narrationState === "playing" ? "playing" : ""}`} onClick={replayInstruction} aria-live="polite"><Volume2 size={21} />{narrationState === "playing" ? "正在播放…" : "再听一次"}</button>
 
                 {activeActivity.interaction?.storyText && (
                   <div className="story-board">

@@ -1169,6 +1169,32 @@ input:focus-visible {
   font-size: 9px;
 }
 
+.ai-coach-notes {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ai-coach-notes > div {
+  padding: 11px 12px;
+  background: rgba(255, 255, 255, 0.6);
+  border-left: 3px solid #83a88c;
+  border-radius: 6px 13px 13px 6px;
+}
+
+.ai-coach-notes small {
+  color: #5e756c;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.ai-coach-notes p {
+  margin: 4px 0 0;
+  color: #64766f;
+  font-size: 10px;
+  line-height: 1.65;
+}
+
 .ai-panel > p {
   margin: 15px 0;
   color: #74827d;
@@ -1449,6 +1475,19 @@ input:focus-visible {
   font-size: 10px;
   font-weight: 750;
   cursor: pointer;
+}
+
+.listen-again.playing {
+  color: #fff;
+  background: var(--learn-accent);
+  border-color: transparent;
+}
+
+.listen-again.playing svg { animation: voice-pulse 850ms ease-in-out infinite alternate; }
+
+@keyframes voice-pulse {
+  from { transform: scale(0.9); opacity: 0.72; }
+  to { transform: scale(1.12); opacity: 1; }
 }
 
 .scene-board {
