@@ -1,4 +1,5 @@
 import { M1_ACTIVITY_LIBRARY } from "./learning-content-m1";
+import { M2_ACTIVITY_LIBRARY } from "./learning-content-m2";
 
 export type LearningDomain = "chinese" | "math" | "english";
 export type ActivityKind =
@@ -12,7 +13,8 @@ export type ActivityKind =
   | "place_in_scene"
   | "sequence_3"
   | "pattern_extend"
-  | "story_choice";
+  | "story_choice"
+  | "memory_pairs";
 export type ActivityTemplate =
   | "tap_choose"
   | "tap_count"
@@ -21,7 +23,8 @@ export type ActivityTemplate =
   | "place_in_scene"
   | "sequence_3"
   | "pattern_extend"
-  | "story_choice";
+  | "story_choice"
+  | "memory_pairs";
 export type InterestKey = "dinosaurs" | "vehicles" | "construction" | "space" | "animals" | "nature";
 
 export const INTEREST_LABELS: Record<InterestKey, string> = {
@@ -547,6 +550,7 @@ const BASE_ACTIVITY_LIBRARY: LearningActivity[] = [
 export const ACTIVITY_LIBRARY: LearningActivity[] = [
   ...BASE_ACTIVITY_LIBRARY,
   ...M1_ACTIVITY_LIBRARY,
+  ...M2_ACTIVITY_LIBRARY,
 ];
 
 export function activityTemplate(activity: Pick<LearningActivity, "kind">): ActivityTemplate {
@@ -573,9 +577,9 @@ export function validateActivityLibrary(activities: LearningActivity[] = ACTIVIT
     if (choiceIds.size !== activity.choices.length) errors.push(`${activity.id}: 选项 ID 重复`);
     if (!choiceIds.has(activity.answerId)) errors.push(`${activity.id}: answerId 不在选项中`);
 
-    if (activity.id.endsWith("-m1")) {
+    if (/-m[12]$/.test(activity.id)) {
       if (!activity.skillId || !activity.ageBand || !activity.difficulty) {
-        errors.push(`${activity.id}: 缺少 M1 分层字段`);
+        errors.push(`${activity.id}: 缺少分层字段`);
       }
       if ((activity.variantCount ?? 0) < 2) errors.push(`${activity.id}: 至少需要两个变量版本`);
     }
@@ -602,6 +606,21 @@ export function validateActivityLibrary(activities: LearningActivity[] = ACTIVIT
       if (["drag_match", "drag_sort", "sequence_3"].includes(template)) {
         for (const choiceId of choiceIds) {
           if (!correctTargets[choiceId]) errors.push(`${activity.id}: ${choiceId} 缺少目标映射`);
+        }
+      }
+    }
+
+    if (template === "memory_pairs") {
+      const groups = Object.values(correctTargets);
+      if (activity.choices.length < 4 || activity.choices.length % 2 !== 0) {
+        errors.push(`${activity.id}: 记忆配对卡片数必须是大于等于 4 的偶数`);
+      }
+      for (const choiceId of choiceIds) {
+        if (!correctTargets[choiceId]) errors.push(`${activity.id}: ${choiceId} 缺少配对组`);
+      }
+      for (const group of new Set(groups)) {
+        if (groups.filter((candidate) => candidate === group).length !== 2) {
+          errors.push(`${activity.id}: 配对组 ${group} 必须恰好包含两张卡`);
         }
       }
     }

@@ -63,8 +63,16 @@ test("exposes an AI provider registry without leaking credentials", async () => 
   assert.ok(["deepseek", "openai"].includes(registry.defaultProvider));
 });
 
+test("discloses the AI-generated activity voice and degrades when unconfigured", async () => {
+  const response = await request("/api/activity-voice", { method: "HEAD" });
+  assert.ok(response.status === 204 || response.status === 503);
+  assert.equal(response.headers.get("x-ai-generated-voice"), "true");
+  assert.equal(response.headers.get("x-voice-model"), "gpt-4o-mini-tts");
+  assert.ok(response.headers.get("x-voice-name"));
+});
+
 test("includes production deployment assets", async () => {
-  const [dockerfile, compose, layout, envExample, serverDeploy, nginxHttp, nginxHttps, serviceWorker, dailyPlanRoute, aiAssistantRoute] = await Promise.all([
+  const [dockerfile, compose, layout, envExample, serverDeploy, nginxHttp, nginxHttps, serviceWorker, dailyPlanRoute, aiAssistantRoute, activityVoiceRoute] = await Promise.all([
     readFile(new URL("Dockerfile", root), "utf8"),
     readFile(new URL("compose.yaml", root), "utf8"),
     readFile(new URL("app/layout.tsx", root), "utf8"),
@@ -75,6 +83,7 @@ test("includes production deployment assets", async () => {
     readFile(new URL("public/sw.js", root), "utf8"),
     readFile(new URL("app/api/daily-plan/route.ts", root), "utf8"),
     readFile(new URL("app/api/ai-assistant/route.ts", root), "utf8"),
+    readFile(new URL("app/api/activity-voice/route.ts", root), "utf8"),
   ]);
 
   assert.match(dockerfile, /USER appuser/);
@@ -87,6 +96,7 @@ test("includes production deployment assets", async () => {
   assert.match(layout, /manifest\.webmanifest/);
   assert.match(envExample, /DEEPSEEK_API_KEY/);
   assert.match(envExample, /OPENAI_API_KEY/);
+  assert.match(envExample, /OPENAI_TTS_MODEL=gpt-4o-mini-tts/);
   assert.match(serverDeploy, /nginx -t/);
   assert.match(serverDeploy, /systemctl reload nginx/);
   assert.match(nginxHttp, /proxy_pass http:\/\/127\.0\.0\.1:__APP_PORT__/);
@@ -100,6 +110,10 @@ test("includes production deployment assets", async () => {
   assert.match(aiAssistantRoute, /\/responses/);
   assert.match(aiAssistantRoute, /store: false/);
   assert.match(aiAssistantRoute, /MAX_REQUESTS_PER_DAY = 40/);
+  assert.match(activityVoiceRoute, /\/audio\/speech/);
+  assert.match(activityVoiceRoute, /performanceInstructions/);
+  assert.match(activityVoiceRoute, /X-AI-Generated-Voice/);
+  assert.match(activityVoiceRoute, /ACTIVITY_LIBRARY\.find/);
 
   for (const script of ["scripts/deploy.sh", "scripts/server-deploy.sh"]) {
     const syntax = spawnSync("sh", ["-n", fileURLToPath(new URL(script, root))], { encoding: "utf8" });
@@ -115,24 +129,28 @@ test("includes production deployment assets", async () => {
   await access(new URL("public/sw.js", root));
 });
 
-test("ships 45 curated activities and all milestone-one interactions", async () => {
-  const [baseSource, milestoneSource] = await Promise.all([
+test("ships 90 curated activities and all learning interactions", async () => {
+  const [baseSource, milestoneSource, expansionSource] = await Promise.all([
     readFile(new URL("lib/learning.ts", root), "utf8"),
     readFile(new URL("lib/learning-content-m1.ts", root), "utf8"),
+    readFile(new URL("lib/learning-content-m2.ts", root), "utf8"),
   ]);
 
   assert.equal((baseSource.match(/^    id: /gm) ?? []).length, 18);
   assert.equal((milestoneSource.match(/^    id: /gm) ?? []).length, 27);
+  assert.equal((expansionSource.match(/^    id: /gm) ?? []).length, 45);
   for (const domain of ["chinese", "math", "english"]) {
     assert.equal((milestoneSource.match(new RegExp(`^    domain: "${domain}"`, "gm")) ?? []).length, 9);
+    assert.equal((expansionSource.match(new RegExp(`^    domain: "${domain}"`, "gm")) ?? []).length, 15);
   }
   for (const interaction of ["tap_count", "drag_match", "drag_sort", "place_in_scene", "sequence_3", "pattern_extend", "story_choice"]) {
     assert.match(milestoneSource, new RegExp(`kind: "${interaction}"`));
   }
+  assert.match(expansionSource, /kind: "memory_pairs"/);
 
-  const activityIds = [baseSource, milestoneSource]
+  const activityIds = [baseSource, milestoneSource, expansionSource]
     .flatMap((source) => [...source.matchAll(/^    id: "([a-z0-9-]+)",$/gm)].map((match) => match[1]));
-  assert.equal(activityIds.length, 45);
+  assert.equal(activityIds.length, 90);
   await Promise.all(activityIds.map((id) => access(new URL(`public/audio/instructions/${id}.mp3`, root))));
 });
 

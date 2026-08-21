@@ -4,7 +4,7 @@ export default function manifest(): MetadataRoute.Manifest {
   return {
     name: "小满的小世界｜三岁启蒙乐园",
     short_name: "小满的小世界",
-    description: "每天三个语文、数学、英语启蒙小任务。",
+    description: "90 个语文、数学、英语启蒙小游戏，每天还有三个个性化任务。",
     start_url: "/",
     scope: "/",
     display: "standalone",

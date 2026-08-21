@@ -23,6 +23,7 @@ import {
   Clock3,
   CloudRain,
   Construction,
+  Compass,
   CupSoda,
   Dog,
   Egg,
@@ -90,7 +91,9 @@ import {
   type LearningDomain,
 } from "../lib/learning";
 
-type View = "today" | "treasure" | "parent";
+type View = "today" | "library" | "treasure" | "parent";
+type LibraryDomain = "all" | LearningDomain;
+type VoiceMode = "expressive" | "device";
 type AiInfo = {
   configured: boolean;
   used: boolean;
@@ -140,6 +143,7 @@ type ChildProfile = {
   gender: "boy";
   interests: InterestKey[];
   soundOn: boolean;
+  voiceMode: VoiceMode;
   reduceMotion: boolean;
   sessionMinutes: number;
 };
@@ -150,6 +154,7 @@ const DEFAULT_PROFILE: ChildProfile = {
   gender: "boy",
   interests: ["dinosaurs", "vehicles", "construction", "space"],
   soundOn: true,
+  voiceMode: "expressive",
   reduceMotion: false,
   sessionMinutes: 10,
 };
@@ -318,6 +323,7 @@ function ChoiceCard({
 
 export default function HomePage() {
   const [view, setView] = useState<View>("today");
+  const [libraryDomain, setLibraryDomain] = useState<LibraryDomain>("all");
   const [profile, setProfile] = useState<ChildProfile>(DEFAULT_PROFILE);
   const [draftName, setDraftName] = useState(DEFAULT_PROFILE.name);
   const [results, setResults] = useState<ActivityResult[]>([]);
@@ -340,6 +346,9 @@ export default function HomePage() {
   const [activityComplete, setActivityComplete] = useState(false);
   const [placements, setPlacements] = useState<Record<string, string>>({});
   const [countedIds, setCountedIds] = useState<string[]>([]);
+  const [flippedMemoryIds, setFlippedMemoryIds] = useState<string[]>([]);
+  const [matchedMemoryIds, setMatchedMemoryIds] = useState<string[]>([]);
+  const [memoryBusy, setMemoryBusy] = useState(false);
   const [selectedPieceId, setSelectedPieceId] = useState<string | null>(null);
   const [dragVisual, setDragVisual] = useState<DragVisual | null>(null);
   const [audioReplayCount, setAudioReplayCount] = useState(0);
@@ -362,6 +371,7 @@ export default function HomePage() {
   const startedAt = useRef(Date.now());
   const dragStart = useRef<{ id: string; x: number; y: number; pointerId: number; moved: boolean } | null>(null);
   const instructionAudio = useRef<HTMLAudioElement | null>(null);
+  const memoryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const availableVoices = useRef<SpeechSynthesisVoice[]>([]);
   const aiChatEnd = useRef<HTMLDivElement | null>(null);
 
@@ -382,6 +392,10 @@ export default function HomePage() {
   const averageAttempts = results.length
     ? (results.slice(-21).reduce((sum, result) => sum + result.attempts, 0) / Math.min(results.length, 21)).toFixed(1)
     : "—";
+  const filteredLibrary = useMemo(
+    () => ACTIVITY_LIBRARY.filter((activity) => libraryDomain === "all" || activity.domain === libraryDomain),
+    [libraryDomain],
+  );
 
   useEffect(() => {
     const storedProfile = safeParse<ChildProfile | null>(localStorage.getItem("cheese-profile-v2"), null);
@@ -657,12 +671,54 @@ export default function HomePage() {
     window.speechSynthesis.speak(utterance);
   }
 
-  function playInstruction(activity: LearningActivity, force = false) {
+  function narrationCopy(activity: LearningActivity, line: "instruction" | "hint" | "success") {
+    if (line === "hint") return `${activity.hint} 我们慢慢找，不着急。`;
+    if (line === "success") return activity.successText;
+    return activity.spokenInstruction;
+  }
+
+  function playActivityNarration(
+    activity: LearningActivity,
+    line: "instruction" | "hint" | "success" = "instruction",
+    force = false,
+  ) {
     if (!profile.soundOn && !force) return;
+    const copy = narrationCopy(activity, line);
+    const language = line === "instruction" ? activity.speechLang : "zh-CN";
+    const deviceVoiceAvailable = "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
+    const playBundledInstruction = () => {
+      if (line !== "instruction") {
+        setNarrationState("error");
+        setToast("语音暂时不可用，请检查手机媒体音量");
+        return;
+      }
+      const bundledAudio = new Audio(`/audio/instructions/${encodeURIComponent(activity.id)}.mp3`);
+      bundledAudio.preload = "auto";
+      bundledAudio.volume = 1;
+      instructionAudio.current = bundledAudio;
+      bundledAudio.onplaying = () => setNarrationState("playing");
+      bundledAudio.onended = () => {
+        instructionAudio.current = null;
+        setNarrationState("idle");
+      };
+      bundledAudio.onerror = () => {
+        instructionAudio.current = null;
+        setNarrationState("error");
+        setToast("语音暂时不可用，请检查手机媒体音量");
+      };
+      const playback = bundledAudio.play();
+      if (playback) void playback.catch(() => bundledAudio.onerror?.(new Event("error")));
+    };
+    if (profile.voiceMode === "device") {
+      if (deviceVoiceAvailable) speak(copy, language, true, force);
+      else playBundledInstruction();
+      return;
+    }
+
     stopNarration(false);
     setNarrationState("playing");
 
-    const audio = new Audio(`/audio/instructions/${activity.id}.mp3`);
+    const audio = new Audio(`/api/activity-voice?activityId=${encodeURIComponent(activity.id)}&line=${line}`);
     audio.preload = "auto";
     audio.volume = 1;
     instructionAudio.current = audio;
@@ -671,7 +727,8 @@ export default function HomePage() {
       if (fallbackStarted) return;
       fallbackStarted = true;
       instructionAudio.current = null;
-      speak(activity.spokenInstruction, activity.speechLang, true, true);
+      if (deviceVoiceAvailable) speak(copy, language, true, true);
+      else playBundledInstruction();
     };
     audio.onplaying = () => setNarrationState("playing");
     audio.onended = () => {
@@ -681,6 +738,10 @@ export default function HomePage() {
     audio.onerror = fallbackToDeviceVoice;
     const playback = audio.play();
     if (playback) void playback.catch(fallbackToDeviceVoice);
+  }
+
+  function playInstruction(activity: LearningActivity, force = false) {
+    playActivityNarration(activity, "instruction", force);
   }
 
   function toggleSound() {
@@ -733,13 +794,15 @@ export default function HomePage() {
     setActivityComplete(true);
     if (activeActivity.domain === "english" && spokenLabel) {
       speak(spokenLabel, "en-US");
-      window.setTimeout(() => speak(activeActivity.successText, "zh-CN", false), 750);
+      window.setTimeout(() => playActivityNarration(activeActivity, "success", true), 750);
     } else {
-      speak(activeActivity.successText, activeActivity.domain === "english" ? "en-US" : "zh-CN");
+      playActivityNarration(activeActivity, "success");
     }
   }
 
   function startActivity(activity: LearningActivity) {
+    if (memoryTimer.current) window.clearTimeout(memoryTimer.current);
+    memoryTimer.current = null;
     const preparedActivity = withSessionVariant(activity);
     setActiveActivity(preparedActivity);
     setAttempts(0);
@@ -748,6 +811,9 @@ export default function HomePage() {
     setActivityComplete(false);
     setPlacements({});
     setCountedIds([]);
+    setFlippedMemoryIds([]);
+    setMatchedMemoryIds([]);
+    setMemoryBusy(false);
     setSelectedPieceId(null);
     setDragVisual(null);
     setAudioReplayCount(0);
@@ -765,6 +831,33 @@ export default function HomePage() {
     playInstruction(activeActivity, true);
   }
 
+  function flipMemoryCard(choiceId: string) {
+    if (!activeActivity || activityComplete || memoryBusy || flippedMemoryIds.includes(choiceId) || matchedMemoryIds.includes(choiceId)) return;
+    if (flippedMemoryIds.length === 0) {
+      setFlippedMemoryIds([choiceId]);
+      return;
+    }
+
+    const firstId = flippedMemoryIds[0];
+    const pairGroups = activeActivity.interaction?.correctTargets ?? {};
+    const isMatch = Boolean(pairGroups[firstId] && pairGroups[firstId] === pairGroups[choiceId]);
+    setFlippedMemoryIds([firstId, choiceId]);
+    setMemoryBusy(true);
+
+    memoryTimer.current = window.setTimeout(() => {
+      if (isMatch) {
+        const nextMatched = [...matchedMemoryIds, firstId, choiceId];
+        setMatchedMemoryIds(nextMatched);
+        if (nextMatched.length === activeActivity.choices.length) finishActivity(Math.max(1, attempts + 1));
+      } else {
+        markInteractionWrong();
+      }
+      setFlippedMemoryIds([]);
+      setMemoryBusy(false);
+      memoryTimer.current = null;
+    }, isMatch ? 430 : 850);
+  }
+
   function chooseAnswer(choice: ActivityChoice) {
     if (!activeActivity || activityComplete) return;
     const nextAttempts = attempts + 1;
@@ -776,14 +869,14 @@ export default function HomePage() {
 
     setWrongChoiceId(choice.id);
     if (nextAttempts >= 2) setRevealedAnswer(true);
-    speak(nextAttempts >= 2 ? `${activeActivity.hint} 看看亮起来的那一个。` : activeActivity.hint, "zh-CN");
+    playActivityNarration(activeActivity, "hint");
   }
 
   function markInteractionWrong() {
     if (!activeActivity) return;
     const nextAttempts = attempts + 1;
     setAttempts(nextAttempts);
-    speak(nextAttempts >= 2 ? `${activeActivity.hint} 再试一次。` : activeActivity.hint, "zh-CN");
+    playActivityNarration(activeActivity, "hint");
   }
 
   function placePiece(pieceId: string, targetId: string) {
@@ -812,7 +905,8 @@ export default function HomePage() {
     const goal = activeActivity.interaction?.countGoal ?? activeActivity.choices.length;
     const nextIds = [...countedIds, pieceId];
     setCountedIds(nextIds);
-    speak(String(nextIds.length), "zh-CN", false);
+    const englishNumbers = ["zero", "one", "two", "three", "four", "five"];
+    speak(activeActivity.speechLang === "en-US" ? englishNumbers[nextIds.length] ?? String(nextIds.length) : String(nextIds.length), activeActivity.speechLang, false);
     if (nextIds.length >= goal) {
       window.setTimeout(() => finishActivity(1), 420);
     }
@@ -862,6 +956,8 @@ export default function HomePage() {
 
   function closeActivity() {
     stopNarration();
+    if (memoryTimer.current) window.clearTimeout(memoryTimer.current);
+    memoryTimer.current = null;
     if (activeActivity && !activityComplete && Date.now() - startedAt.current > 2500) {
       saveActivityResult({
         activityId: activeActivity.id,
@@ -884,11 +980,20 @@ export default function HomePage() {
     setRevealedAnswer(false);
     setPlacements({});
     setCountedIds([]);
+    setFlippedMemoryIds([]);
+    setMatchedMemoryIds([]);
+    setMemoryBusy(false);
     setSelectedPieceId(null);
     setDragVisual(null);
   }
 
   function nextActivity() {
+    if (view === "library") {
+      const candidates = filteredLibrary.filter((activity) => activity.id !== activeActivity?.id);
+      const next = candidates[Math.floor(Math.random() * candidates.length)] ?? ACTIVITY_LIBRARY[0];
+      startActivity(next);
+      return;
+    }
     const remaining = plan.activities.find(
       (activity) => activity.id !== activeActivity?.id && !completedIds.has(activity.id),
     );
@@ -940,6 +1045,11 @@ export default function HomePage() {
   const activeTemplate = activeActivity ? activityTemplate(activeActivity) : null;
   const offlineMission = aiInfo.used && aiInfo.offlineMission ? aiInfo.offlineMission : plan.parentTip;
 
+  function surpriseActivity() {
+    const candidates = filteredLibrary.length ? filteredLibrary : ACTIVITY_LIBRARY;
+    startActivity(candidates[Math.floor(Math.random() * candidates.length)]);
+  }
+
   return (
     <main className={`product-shell ${profile.reduceMotion ? "reduce-motion" : ""}`}>
       <aside className="desktop-sidebar">
@@ -956,6 +1066,9 @@ export default function HomePage() {
         <nav className="desktop-nav" aria-label="主导航">
           <button className={view === "today" ? "active" : ""} onClick={() => setView("today")}>
             <Home size={22} /><span>今天</span>{completedCount > 0 && <i>{completedCount}</i>}
+          </button>
+          <button className={view === "library" ? "active" : ""} onClick={() => setView("library")}>
+            <Compass size={22} /><span>游戏岛</span><i>{ACTIVITY_LIBRARY.length}</i>
           </button>
           <button className={view === "treasure" ? "active" : ""} onClick={() => setView("treasure")}>
             <Gift size={22} /><span>探险宝箱</span>
@@ -982,7 +1095,7 @@ export default function HomePage() {
         </header>
 
         <header className="desktop-topbar">
-          <div><span>{todayLabel()}</span><h1>{view === "today" ? "今天的探险任务" : view === "treasure" ? "探险宝箱" : "家长中心"}</h1></div>
+          <div><span>{todayLabel()}</span><h1>{view === "today" ? "今天的探险任务" : view === "library" ? "游戏岛自由探索" : view === "treasure" ? "探险宝箱" : "家长中心"}</h1></div>
           <div className="desktop-top-actions">
             <span className="today-time"><Clock3 size={16} /> 约 {profile.sessionMinutes} 分钟</span>
             <button className="header-sound" onClick={toggleSound} aria-label={profile.soundOn ? "关闭声音" : "打开声音"}>
@@ -1055,6 +1168,52 @@ export default function HomePage() {
               <span className="offscreen-icon"><Footprints size={25} /></span>
               <div><small>{aiInfo.used && aiInfo.offlineMission ? "AI 挑选的亲子挑战" : "离开屏幕的小挑战"}</small><strong>{offlineMission}</strong></div>
               <button onClick={() => { setToast("已经帮你记住啦"); speak(offlineMission); }}>记住啦 <Check size={16} /></button>
+            </section>
+
+            <section className="keep-playing-banner">
+              <span><Compass size={25} /></span>
+              <div><small>今天还没玩够？</small><strong>游戏岛里有 {ACTIVITY_LIBRARY.length} 个活动，想玩哪个都可以</strong></div>
+              <button onClick={() => setView("library")}>去游戏岛 <ArrowRight size={17} /></button>
+            </section>
+          </div>
+        )}
+
+        {view === "library" && (
+          <div className="view-page library-view">
+            <section className="library-hero">
+              <div>
+                <span className="hero-kicker"><Compass size={15} /> 自由探索 · 不限次数</span>
+                <h2>欢迎来到游戏岛</h2>
+                <p>中文、数学、英语都变成小冒险。可以自己选，也可以让豆豆龙送你去一个惊喜关卡。</p>
+                <button className="hero-start" onClick={surpriseActivity}><Sparkles size={19} />给我一个惊喜</button>
+              </div>
+              <div className="library-hero-count"><strong>{ACTIVITY_LIBRARY.length}</strong><span>个小游戏</span><small>每次顺序都会变化</small></div>
+            </section>
+
+            <div className="library-filter" aria-label="按学科筛选游戏">
+              {([
+                ["all", "全部"],
+                ["chinese", "中文故事"],
+                ["math", "数学游戏"],
+                ["english", "English"],
+              ] as Array<[LibraryDomain, string]>).map(([domain, label]) => (
+                <button key={domain} className={libraryDomain === domain ? "selected" : ""} onClick={() => setLibraryDomain(domain)}>{label}<small>{domain === "all" ? ACTIVITY_LIBRARY.length : ACTIVITY_LIBRARY.filter((activity) => activity.domain === domain).length}</small></button>
+              ))}
+            </div>
+
+            <section className="library-grid">
+              {filteredLibrary.map((activity) => {
+                const DomainIcon = DOMAIN_ICONS[activity.domain];
+                const featureIcon = activity.choices.find((choice) => choice.id === activity.answerId)?.icon ?? activity.choices[0]?.icon ?? "dinosaur";
+                const played = results.some((result) => result.activityId === activity.id && result.correct);
+                return (
+                  <button key={activity.id} className={`library-card library-${activity.domain}`} onClick={() => startActivity(activity)}>
+                    <span className="library-card-icon"><ActivityIcon icon={featureIcon} size={45} strokeWidth={1.8} /></span>
+                    <span className="library-card-copy"><small><DomainIcon size={14} />{DOMAIN_META[activity.domain].shortTitle} · {activity.skill}</small><strong>{activity.title}</strong><i>{activity.instruction}</i></span>
+                    <span className={`library-play ${played ? "played" : ""}`}>{played ? <Check size={17} /> : <Play size={16} fill="currentColor" />}</span>
+                  </button>
+                );
+              })}
             </section>
           </div>
         )}
@@ -1212,6 +1371,7 @@ export default function HomePage() {
               <article className="parent-panel control-panel">
                 <div className="panel-heading"><div><span>体验控制</span><h3>温和地玩，按时停下来</h3></div><Clock3 size={23} /></div>
                 <div className="control-row"><div><strong>每次使用时长</strong><small>三个任务结束后自然收尾</small></div><span>{profile.sessionMinutes} 分钟</span></div>
+                <div className="control-row voice-mode-row"><div><strong>豆豆龙声音</strong><small>{profile.voiceMode === "expressive" ? `AI 合成自然声${aiProviders.find((provider) => provider.id === "openai")?.configured ? "已就绪" : "未配置时自动用设备声"}` : "直接使用手机或平板的系统声音"}</small></div><span className="voice-mode-switch"><button className={profile.voiceMode === "expressive" ? "selected" : ""} onClick={() => setProfile((current) => ({ ...current, voiceMode: "expressive" }))}>自然声</button><button className={profile.voiceMode === "device" ? "selected" : ""} onClick={() => setProfile((current) => ({ ...current, voiceMode: "device" }))}>设备声</button></span></div>
                 <div className="control-row"><div><strong>语音陪伴</strong><small>中英文指令和鼓励</small></div><button className={`toggle ${profile.soundOn ? "on" : ""}`} onClick={toggleSound} aria-label="切换语音陪伴"><i /></button></div>
                 <div className="control-row"><div><strong>减少动画</strong><small>降低运动和庆祝效果</small></div><button className={`toggle ${profile.reduceMotion ? "on" : ""}`} onClick={() => setProfile((current) => ({ ...current, reduceMotion: !current.reduceMotion }))} aria-label="切换减少动画"><i /></button></div>
                 <div className="control-row reset-control"><div><strong>清空试玩进度</strong><small>保留昵称、兴趣和体验设置</small></div><button className={resetConfirming ? "confirming" : ""} onClick={resetTrialProgress}><Trash2 size={15} />{resetConfirming ? "确认清空" : "重置"}</button></div>
@@ -1226,6 +1386,7 @@ export default function HomePage() {
 
       <nav className="touch-nav" aria-label="触控设备主导航">
         <button className={view === "today" ? "active" : ""} onClick={() => setView("today")}><Home size={23} /><span>今天</span></button>
+        <button className={view === "library" ? "active" : ""} onClick={() => setView("library")}><Compass size={23} /><span>游戏岛</span></button>
         <button className={view === "treasure" ? "active" : ""} onClick={() => setView("treasure")}><Gift size={23} /><span>宝箱</span></button>
         <button className={view === "parent" ? "active" : ""} onClick={openParentGate}><LockKeyhole size={22} /><span>家长</span></button>
       </nav>
@@ -1309,6 +1470,24 @@ export default function HomePage() {
                   </div>
                 )}
 
+                {activeTemplate === "memory_pairs" && (
+                  <div className="memory-workspace">
+                    <div className="memory-status"><strong>{matchedMemoryIds.length / 2}</strong><span>/ {activeActivity.choices.length / 2} 对伙伴</span><small>翻两张，找一对</small></div>
+                    <div className="memory-grid">
+                      {activeActivity.choices.map((choice) => {
+                        const visible = flippedMemoryIds.includes(choice.id) || matchedMemoryIds.includes(choice.id);
+                        const matched = matchedMemoryIds.includes(choice.id);
+                        return (
+                          <button key={choice.id} className={`memory-card choice-${choice.color} ${visible ? "visible" : ""} ${matched ? "matched" : ""}`} disabled={matched || memoryBusy} onClick={() => flipMemoryCard(choice.id)} aria-label={visible ? choice.label : "未翻开的记忆卡"}>
+                            <span className="memory-back"><Bone size={31} /></span>
+                            <span className="memory-front"><ActivityIcon icon={choice.icon} size={40} strokeWidth={1.9} /><strong>{choice.label}</strong>{choice.helper && <small>{choice.helper}</small>}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
                 {activeTemplate && DRAG_TEMPLATES.has(activeTemplate) && (
                   <div className={`drag-workspace drag-${activeTemplate}`}>
                     <div className="drop-target-grid">
@@ -1368,8 +1547,8 @@ export default function HomePage() {
               <small>认真完成啦</small>
               <h2 id="learning-title">{activeActivity.successText}</h2>
               <p>{attempts === 1 ? "你认真听完，一次就发现了答案。" : "你没有着急，在提示后找到了答案。"}</p>
-              <button className="success-next" onClick={nextActivity}>{completedCount >= 2 ? "今天玩好啦" : "去下一个任务"}<ArrowRight size={20} /></button>
-              <button className="success-home" onClick={closeActivity}>回到今天</button>
+              <button className="success-next" onClick={nextActivity}>{view === "library" ? "再来一个游戏" : completedCount >= 2 ? "今天玩好啦" : "去下一个任务"}<ArrowRight size={20} /></button>
+              <button className="success-home" onClick={closeActivity}>回到{view === "library" ? "游戏岛" : "今天"}</button>
             </section>
           )}
         </div>

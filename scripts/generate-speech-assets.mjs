@@ -5,7 +5,7 @@ import { basename, join } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const projectRoot = new URL("../", import.meta.url);
-const sourceFiles = ["lib/learning.ts", "lib/learning-content-m1.ts"];
+const sourceFiles = ["lib/learning.ts", "lib/learning-content-m1.ts", "lib/learning-content-m2.ts"];
 const outputDirectory = new URL("public/audio/instructions/", projectRoot);
 const force = process.argv.includes("--force");
 
@@ -53,8 +53,8 @@ if (spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status !== 0) {
 }
 
 const activities = await collectActivities();
-if (activities.length !== 45) {
-  throw new Error(`应生成 45 条活动指令，实际读取到 ${activities.length} 条。`);
+if (activities.length !== 90) {
+  throw new Error(`应生成 90 条活动指令，实际读取到 ${activities.length} 条。`);
 }
 
 await mkdir(outputDirectory, { recursive: true });

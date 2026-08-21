@@ -6,7 +6,7 @@ export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000"),
   applicationName: "小满的小世界",
   title: "小满的小世界｜三岁语数英启蒙乐园",
-  description: "为三岁孩子设计的语文、数学、英语亲子启蒙网站。每天三个小任务，轻松玩，慢慢长大。",
+  description: "为三岁孩子设计的语文、数学、英语亲子启蒙乐园。90 个小游戏自由玩，每天还有三个个性化任务。",
   manifest: "/manifest.webmanifest",
   appleWebApp: {
     capable: true,
@@ -19,7 +19,7 @@ export const metadata: Metadata = {
   },
   openGraph: {
     title: "小满的小世界",
-    description: "每天三个语数英小任务，轻松玩，慢慢长大",
+    description: "90 个语数英小游戏自由探索，每天还有三个个性化任务",
     type: "website",
     locale: "zh_CN",
     images: [{ url: "/og.png", width: 1200, height: 630, alt: "小满的小世界早教乐园" }],
@@ -27,7 +27,7 @@ export const metadata: Metadata = {
   twitter: {
     card: "summary_large_image",
     title: "小满的小世界",
-    description: "每天三个语数英小任务，轻松玩，慢慢长大",
+    description: "90 个语数英小游戏自由探索，每天还有三个个性化任务",
     images: ["/og.png"],
   },
 };
