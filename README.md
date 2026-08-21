@@ -13,6 +13,7 @@
 - 豆豆龙陪伴角色、探险宝箱和基于真实完成记录的家长观察
 - 恐龙、交通工具、工程机械、太空、动物、自然六类兴趣偏好
 - DeepSeek 个性化编排：AI 从审核题库中选题，并为家长解释选题理由、总结过程观察、挑选安全的线下亲子任务
+- 家长 AI 共学助手：支持 DeepSeek/GPT 切换、连续问答、快捷问题和可关闭的匿名学习上下文
 - 昵称、兴趣和学习记录保存在当前浏览器；不会向 AI 发送姓名、照片或录音
 - 手机、平板和桌面响应式界面，支持添加到主屏幕及基础离线访问
 - 家长中心需要长按进入，支持语音和减少动画设置
@@ -40,6 +41,12 @@ APP_PORT=3000
 DEEPSEEK_API_KEY=sk-your-key
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_BASE_URL=https://api.deepseek.com
+
+# 家长可在 DeepSeek 与 GPT 之间切换；GPT 未配置时显示“待配置”
+AI_DEFAULT_PROVIDER=deepseek
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-5.4-mini
+OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 
 密钥只存在于服务器环境变量，不会进入前端构建产物。如果 `/etc/letsencrypt/live/域名/` 已有证书，脚本会自动生成 HTTPS 配置；否则先以 HTTP 启动，并给出 Certbot 命令。自定义证书可这样部署：
@@ -76,13 +83,25 @@ docker compose down
 
 容器带有 `/api/health` 健康检查、自动重启、非 root 用户和最小权限配置。
 
-## DeepSeek 的工作边界
+### 清空试玩进度
 
-服务端只把匿名设备编号、兴趣标签、最近活动 ID、尝试次数、提示等级和完成状态发给 DeepSeek。模型负责从 45 个审核活动中选择“中文 + 数学 + 英语”各一个，并为家长解释选题原因和过程观察；儿童可见的线下任务仍只能从安全白名单中选择。模型超时、输出不合规、达到当日请求上限或未配置密钥时，产品会无感回退到本地编排。
+当前版本没有服务器数据库，学习进度在每台手机或平板的浏览器本地保存。进入家长中心，在“体验控制”里连续点击两次“重置”，即可清空当前设备的学习结果、每日计划和 AI 对话，同时保留昵称、兴趣、声音与动画设置。
+
+也可以在该设备浏览器开发者控制台执行下面的一行命令：
+
+```javascript
+localStorage.removeItem("cheese-results-v2"); localStorage.removeItem("cheese-ai-chat-v1"); localStorage.removeItem("cheese-ai-provider-v1"); localStorage.removeItem("cheese-ai-context-v1"); Object.keys(localStorage).filter((key) => key.startsWith("cheese-plan-")).forEach((key) => localStorage.removeItem(key)); location.reload();
+```
+
+## AI 的工作边界
+
+儿童侧每日任务仍由 DeepSeek 从 45 个审核活动中选择“中文 + 数学 + 英语”各一个，模型不能临时修改题目答案。家长中心另有开放式 AI 共学助手，可在 DeepSeek 与 GPT 之间切换，用于讨论教育观点、生成故事和设计家庭活动；它不增加本地内容白名单，但模型供应商自身政策仍然有效。
+
+只有家长打开“携带近期学习摘要”时，服务端才会发送匿名设备编号、兴趣标签、最近活动 ID、尝试次数、提示等级和完成状态。无论哪种模式都不发送孩子昵称、照片或录音。OpenAI 请求通过 Responses API 发出，并设置 `store: false`。
 
 ## 产品迭代文档
 
-活动扩容、七类新增交互、难度分层和后续版本路线见 [PRD v2.1](docs/PRD-v2.1-activity-expansion.md)。
+活动扩容、七类新增交互和难度路线见 [PRD v2.1](docs/PRD-v2.1-activity-expansion.md)；多模型家长助手、学习上下文和后续 AI 路线见 [AI 赋能 PRD v2.2](docs/PRD-v2.2-ai-family-copilot.md)。
 
 ## 本地开发与验证
 

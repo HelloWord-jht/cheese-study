@@ -53,8 +53,18 @@ test("exposes a dedicated container health endpoint", async () => {
   assert.match(health.time, /^\d{4}-\d{2}-\d{2}T/);
 });
 
+test("exposes an AI provider registry without leaking credentials", async () => {
+  const response = await render("/api/ai-assistant");
+  assert.equal(response.status, 200);
+  const registry = await response.json();
+  assert.deepEqual(registry.providers.map((provider) => provider.id), ["deepseek", "openai"]);
+  assert.ok(registry.providers.every((provider) => typeof provider.configured === "boolean"));
+  assert.ok(registry.providers.every((provider) => !("apiKey" in provider)));
+  assert.ok(["deepseek", "openai"].includes(registry.defaultProvider));
+});
+
 test("includes production deployment assets", async () => {
-  const [dockerfile, compose, layout, envExample, serverDeploy, nginxHttp, nginxHttps, serviceWorker, dailyPlanRoute] = await Promise.all([
+  const [dockerfile, compose, layout, envExample, serverDeploy, nginxHttp, nginxHttps, serviceWorker, dailyPlanRoute, aiAssistantRoute] = await Promise.all([
     readFile(new URL("Dockerfile", root), "utf8"),
     readFile(new URL("compose.yaml", root), "utf8"),
     readFile(new URL("app/layout.tsx", root), "utf8"),
@@ -64,6 +74,7 @@ test("includes production deployment assets", async () => {
     readFile(new URL("deploy/nginx/cheese-study.https.conf.template", root), "utf8"),
     readFile(new URL("public/sw.js", root), "utf8"),
     readFile(new URL("app/api/daily-plan/route.ts", root), "utf8"),
+    readFile(new URL("app/api/ai-assistant/route.ts", root), "utf8"),
   ]);
 
   assert.match(dockerfile, /USER appuser/);
@@ -75,6 +86,7 @@ test("includes production deployment assets", async () => {
   assert.match(layout, /NEXT_PUBLIC_SITE_URL/);
   assert.match(layout, /manifest\.webmanifest/);
   assert.match(envExample, /DEEPSEEK_API_KEY/);
+  assert.match(envExample, /OPENAI_API_KEY/);
   assert.match(serverDeploy, /nginx -t/);
   assert.match(serverDeploy, /systemctl reload nginx/);
   assert.match(nginxHttp, /proxy_pass http:\/\/127\.0\.0\.1:__APP_PORT__/);
@@ -85,6 +97,9 @@ test("includes production deployment assets", async () => {
   assert.match(dailyPlanRoute, /selectionReason/);
   assert.match(dailyPlanRoute, /offlineMissionId/);
   assert.match(dailyPlanRoute, /thinking: \{ type: "disabled" \}/);
+  assert.match(aiAssistantRoute, /\/responses/);
+  assert.match(aiAssistantRoute, /store: false/);
+  assert.match(aiAssistantRoute, /MAX_REQUESTS_PER_DAY = 40/);
 
   for (const script of ["scripts/deploy.sh", "scripts/server-deploy.sh"]) {
     const syntax = spawnSync("sh", ["-n", fileURLToPath(new URL(script, root))], { encoding: "utf8" });

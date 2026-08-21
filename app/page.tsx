@@ -10,6 +10,7 @@ import {
   Banana,
   Bed,
   Bird,
+  Bot,
   Bone,
   BookOpen,
   BusFront,
@@ -53,6 +54,7 @@ import {
   Rocket,
   ScanFace,
   ShieldCheck,
+  Send,
   Smile,
   Sparkles,
   Square,
@@ -62,6 +64,7 @@ import {
   TrainFront,
   TreePine,
   Triangle,
+  Trash2,
   Umbrella,
   Volume2,
   VolumeX,
@@ -99,6 +102,20 @@ type AiInfo = {
 };
 type DragVisual = { id: string; x: number; y: number; moved: boolean };
 type NarrationState = "idle" | "playing" | "error";
+type AiProviderId = "deepseek" | "openai";
+type AiProvider = {
+  id: AiProviderId;
+  label: string;
+  model: string;
+  configured: boolean;
+};
+type AiChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  provider?: AiProviderId;
+  model?: string;
+};
 
 const DRAG_TEMPLATES = new Set<ActivityTemplate>([
   "drag_match",
@@ -205,6 +222,17 @@ const DOMAIN_ICONS: Record<LearningDomain, LucideIcon> = {
 };
 
 const REWARD_ICONS: IconKey[] = ["dinosaur", "rocket", "excavator", "train", "dog", "leaf"];
+const AI_WELCOME_MESSAGE: AiChatMessage = {
+  id: "welcome",
+  role: "assistant",
+  content: "我是给家长使用的 AI 共学助手。你可以让我解读近期活动、设计亲子游戏，也可以直接讨论启蒙和家庭教育问题。",
+};
+const AI_QUICK_PROMPTS = [
+  "结合近期记录，解读一下他的表现",
+  "把今天的三个活动延伸到生活里",
+  "帮我安排下周每天十分钟的启蒙重点",
+  "用恐龙和挖掘机设计一个亲子游戏",
+];
 
 function safeParse<T>(value: string | null, fallback: T): T {
   if (!value) return fallback;
@@ -220,6 +248,19 @@ function createClientId() {
     return `family_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
   }
   return `family_${Math.random().toString(36).slice(2, 18)}`;
+}
+
+function createChatId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return `chat_${crypto.randomUUID()}`;
+  return `chat_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function isAiChatMessage(value: unknown): value is AiChatMessage {
+  if (!value || typeof value !== "object") return false;
+  const item = value as Partial<AiChatMessage>;
+  return typeof item.id === "string"
+    && (item.role === "user" || item.role === "assistant")
+    && typeof item.content === "string";
 }
 
 function todayLabel() {
@@ -307,11 +348,22 @@ export default function HomePage() {
   const [gateHolding, setGateHolding] = useState(false);
   const [toast, setToast] = useState("");
   const [clientId, setClientId] = useState("family_device");
+  const [aiProviders, setAiProviders] = useState<AiProvider[]>([
+    { id: "deepseek", label: "DeepSeek", model: "deepseek-v4-flash", configured: false },
+    { id: "openai", label: "GPT", model: "gpt-5.4-mini", configured: false },
+  ]);
+  const [assistantProvider, setAssistantProvider] = useState<AiProviderId>("deepseek");
+  const [assistantMessages, setAssistantMessages] = useState<AiChatMessage[]>([AI_WELCOME_MESSAGE]);
+  const [assistantInput, setAssistantInput] = useState("");
+  const [assistantLoading, setAssistantLoading] = useState(false);
+  const [includeLearningContext, setIncludeLearningContext] = useState(true);
+  const [resetConfirming, setResetConfirming] = useState(false);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const startedAt = useRef(Date.now());
   const dragStart = useRef<{ id: string; x: number; y: number; pointerId: number; moved: boolean } | null>(null);
   const instructionAudio = useRef<HTMLAudioElement | null>(null);
   const availableVoices = useRef<SpeechSynthesisVoice[]>([]);
+  const aiChatEnd = useRef<HTMLDivElement | null>(null);
 
   const todayResults = useMemo(
     () => results.filter((result) => result.date === dateKey),
@@ -345,6 +397,9 @@ export default function HomePage() {
     const storedClientId = localStorage.getItem("cheese-client-id") || createClientId();
     const currentDate = localDateKey();
     const cachedPlan = safeParse<DailyPlan | null>(localStorage.getItem(`cheese-plan-${currentDate}`), null);
+    const storedChat = safeParse<unknown[]>(localStorage.getItem("cheese-ai-chat-v1"), []);
+    const storedProvider = localStorage.getItem("cheese-ai-provider-v1");
+    const storedContextPreference = localStorage.getItem("cheese-ai-context-v1");
 
     localStorage.setItem("cheese-client-id", storedClientId);
     const hydrationTimer = window.setTimeout(() => {
@@ -354,6 +409,11 @@ export default function HomePage() {
       setResults(Array.isArray(storedResults) ? storedResults.slice(-180) : []);
       setDateKey(currentDate);
       setPlan(cachedPlan && isDailyPlan(cachedPlan) ? cachedPlan : createCuratedPlan(currentDate, nextProfile.interests));
+      setAssistantMessages(Array.isArray(storedChat) && storedChat.some(isAiChatMessage)
+        ? storedChat.filter(isAiChatMessage).slice(-20)
+        : [AI_WELCOME_MESSAGE]);
+      if (storedProvider === "deepseek" || storedProvider === "openai") setAssistantProvider(storedProvider);
+      setIncludeLearningContext(storedContextPreference !== "false");
       setHydrated(true);
     }, 0);
 
@@ -369,6 +429,45 @@ export default function HomePage() {
     if (!hydrated) return;
     localStorage.setItem("cheese-results-v2", JSON.stringify(results.slice(-180)));
   }, [results, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    localStorage.setItem("cheese-ai-chat-v1", JSON.stringify(assistantMessages.slice(-20)));
+  }, [assistantMessages, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    localStorage.setItem("cheese-ai-provider-v1", assistantProvider);
+    localStorage.setItem("cheese-ai-context-v1", String(includeLearningContext));
+  }, [assistantProvider, hydrated, includeLearningContext]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    let cancelled = false;
+    void fetch("/api/ai-assistant", { headers: { Accept: "application/json" } })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("provider registry unavailable");
+        return response.json() as Promise<{ providers?: AiProvider[]; defaultProvider?: AiProviderId }>;
+      })
+      .then((data) => {
+        if (cancelled || !Array.isArray(data.providers)) return;
+        const providers = data.providers.filter((provider) => provider.id === "deepseek" || provider.id === "openai");
+        if (providers.length) setAiProviders(providers);
+        const storedProvider = localStorage.getItem("cheese-ai-provider-v1");
+        if (storedProvider !== "deepseek" && storedProvider !== "openai" && data.defaultProvider) {
+          setAssistantProvider(data.defaultProvider);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setToast("AI 模型状态暂时不可用");
+      });
+    return () => { cancelled = true; };
+  }, [hydrated]);
+
+  useEffect(() => {
+    if (view !== "parent") return;
+    aiChatEnd.current?.scrollIntoView({ behavior: profile.reduceMotion ? "auto" : "smooth", block: "nearest" });
+  }, [assistantMessages, assistantLoading, profile.reduceMotion, view]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -423,6 +522,92 @@ export default function HomePage() {
     } finally {
       setPlanLoading(false);
     }
+  }
+
+  async function sendAssistantMessage() {
+    const content = assistantInput.trim().slice(0, 500);
+    if (!content || assistantLoading) return;
+    const selectedProvider = aiProviders.find((provider) => provider.id === assistantProvider);
+    if (!selectedProvider?.configured) {
+      setToast(`${selectedProvider?.label || "所选模型"} 尚未配置 API Key`);
+      return;
+    }
+
+    const userMessage: AiChatMessage = { id: createChatId(), role: "user", content };
+    const conversation = [...assistantMessages.filter((message) => message.id !== "welcome"), userMessage].slice(-19);
+    setAssistantMessages((messages) => [...messages, userMessage].slice(-20));
+    setAssistantInput("");
+    setAssistantLoading(true);
+
+    try {
+      const response = await fetch("/api/ai-assistant", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: assistantProvider,
+          messages: conversation.map(({ role, content: messageContent }) => ({ role, content: messageContent })),
+          context: includeLearningContext ? {
+            interests: profile.interests,
+            recentResults,
+            todayActivities: plan.activities.map((activity) => ({ activityId: activity.id })),
+          } : undefined,
+          clientId,
+        }),
+      });
+      const data = (await response.json()) as {
+        reply?: string;
+        provider?: AiProviderId;
+        model?: string;
+        error?: string;
+      };
+      if (!response.ok || !data.reply) throw new Error(data.error || "AI 暂时没有连上");
+      setAssistantMessages((messages) => [...messages, {
+        id: createChatId(),
+        role: "assistant",
+        content: data.reply as string,
+        provider: data.provider,
+        model: data.model,
+      }].slice(-20));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "AI 暂时没有连上";
+      setAssistantMessages((messages) => [...messages, {
+        id: createChatId(),
+        role: "assistant",
+        content: `${message}。刚才的问题还在对话里，稍后可以直接再问一次。`,
+      }].slice(-20));
+    } finally {
+      setAssistantLoading(false);
+    }
+  }
+
+  function clearAssistantChat() {
+    setAssistantMessages([AI_WELCOME_MESSAGE]);
+    setToast("AI 对话已清空");
+  }
+
+  function resetTrialProgress() {
+    if (!resetConfirming) {
+      setResetConfirming(true);
+      setToast("再点一次确认清空试玩进度");
+      return;
+    }
+
+    localStorage.removeItem("cheese-results-v2");
+    localStorage.removeItem("cheese-ai-chat-v1");
+    localStorage.removeItem("cheese-ai-provider-v1");
+    localStorage.removeItem("cheese-ai-context-v1");
+    Object.keys(localStorage)
+      .filter((key) => key.startsWith("cheese-plan-"))
+      .forEach((key) => localStorage.removeItem(key));
+
+    setResults([]);
+    setPlan(createCuratedPlan(dateKey, profile.interests));
+    setPlanLoading(false);
+    setAssistantMessages([AI_WELCOME_MESSAGE]);
+    setAssistantProvider("deepseek");
+    setIncludeLearningContext(true);
+    setResetConfirming(false);
+    setToast("试玩进度已全部清空");
   }
 
   function stopNarration(updateState = true) {
@@ -884,7 +1069,7 @@ export default function HomePage() {
             <div className="section-title-row"><div><span>本周收藏</span><h2>我的探险伙伴</h2></div><p>点一点已经亮起来的伙伴</p></div>
             <section className="reward-grid">
               {REWARD_ICONS.map((icon, index) => {
-                const unlocked = index < Math.max(1, Math.min(results.length, REWARD_ICONS.length));
+                const unlocked = index < Math.min(results.filter((result) => result.correct).length, REWARD_ICONS.length);
                 const names = ["勇敢小恐龙", "星星火箭", "挖土高手", "长长火车", "汪汪伙伴", "森林新芽"];
                 return (
                   <button
@@ -945,6 +1130,72 @@ export default function HomePage() {
                 <button className="refresh-plan" disabled={planLoading} onClick={() => void requestDailyPlan(true)}><RefreshCw size={17} className={planLoading ? "spinning" : ""} />重新编排今天</button>
               </article>
 
+              <article className="parent-panel ai-chat-panel">
+                <div className="ai-chat-heading">
+                  <div>
+                    <span className="ai-chat-kicker"><Bot size={16} /> AI 家庭共学助手</span>
+                    <h3>和 AI 一起想想下一步</h3>
+                    <p>成人讨论区，可结合匿名学习摘要，也可以聊更广泛的启蒙与家庭教育问题。</p>
+                  </div>
+                  <button className="clear-chat" onClick={clearAssistantChat} disabled={assistantMessages.length <= 1}><Trash2 size={16} />清空对话</button>
+                </div>
+
+                <div className="ai-chat-toolbar">
+                  <div className="provider-switch" aria-label="选择 AI 模型">
+                    {aiProviders.map((provider) => (
+                      <button
+                        key={provider.id}
+                        className={assistantProvider === provider.id ? "selected" : ""}
+                        aria-pressed={assistantProvider === provider.id}
+                        onClick={() => setAssistantProvider(provider.id)}
+                      >
+                        <span>{provider.label}</span>
+                        <small>{provider.configured ? provider.model : "待配置"}</small>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="context-control">
+                    <div><strong>携带近期学习摘要</strong><small>不含昵称、照片和录音</small></div>
+                    <button className={`toggle ${includeLearningContext ? "on" : ""}`} onClick={() => setIncludeLearningContext((current) => !current)} aria-label="切换学习上下文"><i /></button>
+                  </div>
+                </div>
+
+                <div className="ai-quick-prompts" aria-label="快捷问题">
+                  {AI_QUICK_PROMPTS.map((prompt) => <button key={prompt} onClick={() => setAssistantInput(prompt)}>{prompt}</button>)}
+                </div>
+
+                <div className="ai-chat-log" aria-live="polite">
+                  {assistantMessages.map((message) => (
+                    <div key={message.id} className={`ai-message ai-message-${message.role}`}>
+                      <span>{message.role === "assistant" ? <Bot size={16} /> : "家长"}</span>
+                      <div>
+                        <p>{message.content}</p>
+                        {message.role === "assistant" && message.model && <small>{message.provider === "openai" ? "GPT" : "DeepSeek"} · {message.model}</small>}
+                      </div>
+                    </div>
+                  ))}
+                  {assistantLoading && <div className="ai-message ai-message-assistant ai-message-loading"><span><Bot size={16} /></span><div><p><i /><i /><i /></p></div></div>}
+                  <div ref={aiChatEnd} />
+                </div>
+
+                <div className="ai-chat-composer">
+                  <textarea
+                    value={assistantInput}
+                    maxLength={500}
+                    rows={3}
+                    placeholder="例如：三岁半有必要开始自然拼读吗？"
+                    onChange={(event) => setAssistantInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                        event.preventDefault();
+                        void sendAssistantMessage();
+                      }
+                    }}
+                  />
+                  <div><small>{assistantInput.length}/500 · Enter 发送，Shift + Enter 换行</small><button disabled={!assistantInput.trim() || assistantLoading} onClick={() => void sendAssistantMessage()}>{assistantLoading ? <RefreshCw size={18} className="spinning" /> : <Send size={18} />}发送</button></div>
+                </div>
+              </article>
+
               <article className="parent-panel observation-panel">
                 <div className="panel-heading"><div><span>今日观察</span><h3>看见过程，不只看对错</h3></div><BookOpen size={23} /></div>
                 {todayResults.length ? todayResults.map((result) => {
@@ -963,10 +1214,11 @@ export default function HomePage() {
                 <div className="control-row"><div><strong>每次使用时长</strong><small>三个任务结束后自然收尾</small></div><span>{profile.sessionMinutes} 分钟</span></div>
                 <div className="control-row"><div><strong>语音陪伴</strong><small>中英文指令和鼓励</small></div><button className={`toggle ${profile.soundOn ? "on" : ""}`} onClick={toggleSound} aria-label="切换语音陪伴"><i /></button></div>
                 <div className="control-row"><div><strong>减少动画</strong><small>降低运动和庆祝效果</small></div><button className={`toggle ${profile.reduceMotion ? "on" : ""}`} onClick={() => setProfile((current) => ({ ...current, reduceMotion: !current.reduceMotion }))} aria-label="切换减少动画"><i /></button></div>
+                <div className="control-row reset-control"><div><strong>清空试玩进度</strong><small>保留昵称、兴趣和体验设置</small></div><button className={resetConfirming ? "confirming" : ""} onClick={resetTrialProgress}><Trash2 size={15} />{resetConfirming ? "确认清空" : "重置"}</button></div>
               </article>
             </section>
 
-            <section className="privacy-banner"><span><ShieldCheck size={28} /></span><div><strong>孩子的数据只属于家庭</strong><p>昵称、兴趣和完成记录保存在当前设备；发送给 DeepSeek 的只有匿名设备编号、兴趣标签和活动结果，不包含姓名、照片或录音。</p></div></section>
+            <section className="privacy-banner"><span><ShieldCheck size={28} /></span><div><strong>孩子的数据只属于家庭</strong><p>昵称和完成记录保存在当前设备；只有打开“携带近期学习摘要”时，所选 AI 模型才会收到匿名设备编号、兴趣标签与活动结果，不包含姓名、照片或录音。</p></div></section>
             <button className="back-to-child" onClick={() => setView("today")}><ChevronLeft size={19} />返回孩子的探险乐园</button>
           </div>
         )}
