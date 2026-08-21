@@ -1,5 +1,27 @@
+import { M1_ACTIVITY_LIBRARY } from "./learning-content-m1";
+
 export type LearningDomain = "chinese" | "math" | "english";
-export type ActivityKind = "listen_choose" | "count_choose" | "look_choose" | "pattern_choose";
+export type ActivityKind =
+  | "listen_choose"
+  | "count_choose"
+  | "look_choose"
+  | "pattern_choose"
+  | "tap_count"
+  | "drag_match"
+  | "drag_sort"
+  | "place_in_scene"
+  | "sequence_3"
+  | "pattern_extend"
+  | "story_choice";
+export type ActivityTemplate =
+  | "tap_choose"
+  | "tap_count"
+  | "drag_match"
+  | "drag_sort"
+  | "place_in_scene"
+  | "sequence_3"
+  | "pattern_extend"
+  | "story_choice";
 export type InterestKey = "dinosaurs" | "vehicles" | "construction" | "space" | "animals" | "nature";
 
 export const INTEREST_LABELS: Record<InterestKey, string> = {
@@ -58,6 +80,24 @@ export const ICON_KEYS = [
   "hello",
   "bye",
   "thanks",
+  "house",
+  "tree",
+  "umbrella",
+  "cloud",
+  "wrench",
+  "hammer",
+  "stone",
+  "star",
+  "box",
+  "bridge",
+  "bed",
+  "cup",
+  "rabbit",
+  "helmet",
+  "banana",
+  "ship",
+  "flower",
+  "book",
 ] as const;
 
 export type IconKey = (typeof ICON_KEYS)[number];
@@ -68,12 +108,32 @@ export interface ActivityChoice {
   helper?: string;
   icon: IconKey;
   color: "coral" | "blue" | "yellow" | "green" | "purple" | "cream";
+  visualScale?: "small" | "medium" | "large";
+}
+
+export interface ActivityTarget {
+  id: string;
+  label: string;
+  helper?: string;
+  icon?: IconKey;
+  color: ActivityChoice["color"];
+}
+
+export interface ActivityInteraction {
+  targets?: ActivityTarget[];
+  correctTargets?: Record<string, string>;
+  countGoal?: number;
+  storyText?: string[];
 }
 
 export interface LearningActivity {
   id: string;
   domain: LearningDomain;
   kind: ActivityKind;
+  skillId?: string;
+  difficulty?: 1 | 2 | 3;
+  ageBand?: "30-36m" | "36-42m" | "42-48m";
+  variantCount?: number;
   title: string;
   skill: string;
   instruction: string;
@@ -87,6 +147,7 @@ export interface LearningActivity {
   interests: InterestKey[];
   sceneIcons?: IconKey[];
   sceneLabel?: string;
+  interaction?: ActivityInteraction;
 }
 
 export interface DailyPlan {
@@ -105,9 +166,15 @@ export interface ActivityResult {
   correct: boolean;
   attempts: number;
   durationSeconds: number;
+  template?: ActivityTemplate;
+  firstTryCorrect?: boolean;
+  hintLevelUsed?: 0 | 1 | 2;
+  audioReplayCount?: number;
+  completed?: boolean;
+  abandoned?: boolean;
 }
 
-export const ACTIVITY_LIBRARY: LearningActivity[] = [
+const BASE_ACTIVITY_LIBRARY: LearningActivity[] = [
   {
     id: "cn-excavator-action",
     domain: "chinese",
@@ -477,6 +544,77 @@ export const ACTIVITY_LIBRARY: LearningActivity[] = [
   },
 ];
 
+export const ACTIVITY_LIBRARY: LearningActivity[] = [
+  ...BASE_ACTIVITY_LIBRARY,
+  ...M1_ACTIVITY_LIBRARY,
+];
+
+export function activityTemplate(activity: Pick<LearningActivity, "kind">): ActivityTemplate {
+  if (
+    activity.kind === "listen_choose" ||
+    activity.kind === "count_choose" ||
+    activity.kind === "look_choose" ||
+    activity.kind === "pattern_choose"
+  ) {
+    return "tap_choose";
+  }
+  return activity.kind;
+}
+
+export function validateActivityLibrary(activities: LearningActivity[] = ACTIVITY_LIBRARY) {
+  const errors: string[] = [];
+  const ids = new Set<string>();
+
+  for (const activity of activities) {
+    if (ids.has(activity.id)) errors.push(`${activity.id}: 活动 ID 重复`);
+    ids.add(activity.id);
+
+    const choiceIds = new Set(activity.choices.map((choice) => choice.id));
+    if (choiceIds.size !== activity.choices.length) errors.push(`${activity.id}: 选项 ID 重复`);
+    if (!choiceIds.has(activity.answerId)) errors.push(`${activity.id}: answerId 不在选项中`);
+
+    if (activity.id.endsWith("-m1")) {
+      if (!activity.skillId || !activity.ageBand || !activity.difficulty) {
+        errors.push(`${activity.id}: 缺少 M1 分层字段`);
+      }
+      if ((activity.variantCount ?? 0) < 2) errors.push(`${activity.id}: 至少需要两个变量版本`);
+    }
+
+    const template = activityTemplate(activity);
+    const targets = activity.interaction?.targets ?? [];
+    const targetIds = new Set(targets.map((target) => target.id));
+    const correctTargets = activity.interaction?.correctTargets ?? {};
+
+    if (template === "tap_count") {
+      const countGoal = activity.interaction?.countGoal ?? 0;
+      if (!Number.isInteger(countGoal) || countGoal < 1 || countGoal > activity.choices.length) {
+        errors.push(`${activity.id}: countGoal 超出可点数对象范围`);
+      }
+    }
+
+    if (["drag_match", "drag_sort", "place_in_scene", "sequence_3", "pattern_extend"].includes(template)) {
+      if (targets.length === 0) errors.push(`${activity.id}: 拖拽活动缺少目标区域`);
+      for (const [choiceId, targetId] of Object.entries(correctTargets)) {
+        if (!choiceIds.has(choiceId)) errors.push(`${activity.id}: 映射包含未知选项 ${choiceId}`);
+        if (!targetIds.has(targetId)) errors.push(`${activity.id}: 映射包含未知目标 ${targetId}`);
+      }
+      if (!correctTargets[activity.answerId]) errors.push(`${activity.id}: 正确选项缺少目标映射`);
+      if (["drag_match", "drag_sort", "sequence_3"].includes(template)) {
+        for (const choiceId of choiceIds) {
+          if (!correctTargets[choiceId]) errors.push(`${activity.id}: ${choiceId} 缺少目标映射`);
+        }
+      }
+    }
+  }
+
+  return errors;
+}
+
+const activityLibraryErrors = validateActivityLibrary();
+if (activityLibraryErrors.length > 0) {
+  throw new Error(`活动题库校验失败：\n${activityLibraryErrors.join("\n")}`);
+}
+
 export function localDateKey(date = new Date()) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -495,14 +633,16 @@ export function selectCuratedActivities(
 ) {
   const chosen: LearningActivity[] = [];
   const seed = dateSeed(dateKey);
+  const usedTemplates = new Set<ActivityTemplate>();
 
   for (const domain of ["chinese", "math", "english"] as const) {
     const domainActivities = ACTIVITY_LIBRARY.filter((activity) => activity.domain === domain);
     const preferred = preferredIds
       .map((id) => domainActivities.find((activity) => activity.id === id))
-      .find(Boolean);
+      .find((activity) => activity && !usedTemplates.has(activityTemplate(activity)));
     if (preferred) {
       chosen.push(preferred);
+      usedTemplates.add(activityTemplate(preferred));
       continue;
     }
 
@@ -511,10 +651,13 @@ export function selectCuratedActivities(
         activity,
         score:
           activity.interests.filter((interest) => interests.includes(interest)).length * 10 +
+          (usedTemplates.has(activityTemplate(activity)) ? -50 : 25) +
           ((seed + index * 7) % domainActivities.length),
       }))
       .sort((a, b) => b.score - a.score);
-    chosen.push(ranked[seed % Math.min(3, ranked.length)].activity);
+    const selection = ranked[seed % Math.min(3, ranked.length)].activity;
+    chosen.push(selection);
+    usedTemplates.add(activityTemplate(selection));
   }
 
   return chosen;

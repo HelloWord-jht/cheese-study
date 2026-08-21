@@ -20,8 +20,32 @@ if [ ! -f .env ]; then
 fi
 
 docker compose up -d --build --remove-orphans
+
+container_name=cheese-study
+waited=0
+health=starting
+while [ "$waited" -lt 90 ]; do
+  health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_name" 2>/dev/null || echo missing)
+  if [ "$health" = "healthy" ]; then
+    break
+  fi
+  if [ "$health" = "unhealthy" ] || [ "$health" = "exited" ] || [ "$health" = "dead" ] || [ "$health" = "missing" ]; then
+    echo "容器启动失败，当前状态：$health"
+    docker compose logs --tail=80 web || true
+    exit 1
+  fi
+  sleep 3
+  waited=$((waited + 3))
+done
+
+if [ "$health" != "healthy" ]; then
+  echo "等待健康检查超时，当前状态：$health"
+  docker compose logs --tail=80 web || true
+  exit 1
+fi
+
 docker compose ps
 
 port=$(sed -n 's/^APP_PORT=//p' .env | tail -n 1)
 port=${port:-3000}
-echo "部署完成：http://localhost:${port}"
+echo "应用已就绪：http://127.0.0.1:${port}（仅供本机/Nginx 访问）"

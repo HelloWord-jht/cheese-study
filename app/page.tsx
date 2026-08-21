@@ -1,12 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   Accessibility,
   Angry,
   Apple,
   ArrowRight,
+  Banana,
+  Bed,
   Bird,
   Bone,
   BookOpen,
@@ -18,28 +20,36 @@ import {
   Circle,
   CircleDot,
   Clock3,
+  CloudRain,
   Construction,
+  CupSoda,
   Dog,
   Egg,
   Fish,
   Footprints,
   Frown,
+  Gem,
   Gift,
+  Hammer,
   Hand,
+  HardHat,
   Heart,
   HeartHandshake,
   Home,
   Languages,
   Leaf,
+  Landmark,
   LockKeyhole,
   Medal,
   Moon,
   MoveHorizontal,
   MoveRight,
   Paintbrush,
+  Package,
   Pause,
   Play,
   RefreshCw,
+  Rabbit,
   Rocket,
   ScanFace,
   ShieldCheck,
@@ -48,22 +58,28 @@ import {
   Square,
   Star,
   Sun,
+  Ship,
   TrainFront,
+  TreePine,
   Triangle,
+  Umbrella,
   Volume2,
   VolumeX,
   Waves,
+  Wrench,
   X,
 } from "lucide-react";
 import {
   ACTIVITY_LIBRARY,
   DOMAIN_META,
   INTEREST_LABELS,
+  activityTemplate,
   createCuratedPlan,
   isDailyPlan,
   localDateKey,
   type ActivityChoice,
   type ActivityResult,
+  type ActivityTemplate,
   type DailyPlan,
   type IconKey,
   type InterestKey,
@@ -73,6 +89,24 @@ import {
 
 type View = "today" | "treasure" | "parent";
 type AiInfo = { configured: boolean; used: boolean; model: string; reason?: string };
+type DragVisual = { id: string; x: number; y: number; moved: boolean };
+
+const DRAG_TEMPLATES = new Set<ActivityTemplate>([
+  "drag_match",
+  "drag_sort",
+  "place_in_scene",
+  "sequence_3",
+  "pattern_extend",
+]);
+
+function withSessionVariant(activity: LearningActivity): LearningActivity {
+  const choices = [...activity.choices];
+  for (let index = choices.length - 1; index > 0; index -= 1) {
+    const targetIndex = Math.floor(Math.random() * (index + 1));
+    [choices[index], choices[targetIndex]] = [choices[targetIndex], choices[index]];
+  }
+  return { ...activity, choices };
+}
 
 type ChildProfile = {
   name: string;
@@ -135,6 +169,24 @@ const ICON_MAP: Record<IconKey, LucideIcon> = {
   hello: Hand,
   bye: MoveRight,
   thanks: HeartHandshake,
+  house: Home,
+  tree: TreePine,
+  umbrella: Umbrella,
+  cloud: CloudRain,
+  wrench: Wrench,
+  hammer: Hammer,
+  stone: Gem,
+  star: Star,
+  box: Package,
+  bridge: Landmark,
+  bed: Bed,
+  cup: CupSoda,
+  rabbit: Rabbit,
+  helmet: HardHat,
+  banana: Banana,
+  ship: Ship,
+  flower: Leaf,
+  book: BookOpen,
 };
 
 const DOMAIN_ICONS: Record<LearningDomain, LucideIcon> = {
@@ -205,7 +257,7 @@ function ChoiceCard({
   onClick: () => void;
 }) {
   return (
-    <button className={`choice-card choice-${choice.color} choice-${state}`} onClick={onClick}>
+    <button className={`choice-card choice-${choice.color} choice-${state} scale-${choice.visualScale ?? "medium"}`} onClick={onClick}>
       <span className="choice-illustration"><ActivityIcon icon={choice.icon} size={62} strokeWidth={1.9} /></span>
       <strong>{choice.label}</strong>
       {choice.helper && <small>{choice.helper}</small>}
@@ -236,12 +288,18 @@ export default function HomePage() {
   const [wrongChoiceId, setWrongChoiceId] = useState<string | null>(null);
   const [revealedAnswer, setRevealedAnswer] = useState(false);
   const [activityComplete, setActivityComplete] = useState(false);
+  const [placements, setPlacements] = useState<Record<string, string>>({});
+  const [countedIds, setCountedIds] = useState<string[]>([]);
+  const [selectedPieceId, setSelectedPieceId] = useState<string | null>(null);
+  const [dragVisual, setDragVisual] = useState<DragVisual | null>(null);
+  const [audioReplayCount, setAudioReplayCount] = useState(0);
   const [gateOpen, setGateOpen] = useState(false);
   const [gateHolding, setGateHolding] = useState(false);
   const [toast, setToast] = useState("");
   const [clientId, setClientId] = useState("family_device");
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const startedAt = useRef(Date.now());
+  const dragStart = useRef<{ id: string; x: number; y: number; pointerId: number; moved: boolean } | null>(null);
 
   const todayResults = useMemo(
     () => results.filter((result) => result.date === dateKey),
@@ -355,14 +413,69 @@ export default function HomePage() {
     window.speechSynthesis.speak(utterance);
   }
 
+  function saveActivityResult(record: ActivityResult) {
+    setResults((items) => {
+      const existing = items.find(
+        (item) => item.date === record.date && item.activityId === record.activityId,
+      );
+      if (existing?.correct && !record.correct) return items;
+      return [
+        ...items.filter(
+          (item) => !(item.date === record.date && item.activityId === record.activityId),
+        ),
+        record,
+      ];
+    });
+  }
+
+  function finishActivity(finalAttempts: number, spokenLabel?: string) {
+    if (!activeActivity || activityComplete) return;
+    const durationSeconds = Math.max(5, Math.round((Date.now() - startedAt.current) / 1000));
+    saveActivityResult({
+      activityId: activeActivity.id,
+      domain: activeActivity.domain,
+      date: dateKey,
+      correct: true,
+      attempts: Math.max(1, finalAttempts),
+      durationSeconds,
+      template: activityTemplate(activeActivity),
+      firstTryCorrect: finalAttempts <= 1,
+      hintLevelUsed: attempts >= 2 ? 2 : attempts >= 1 ? 1 : 0,
+      audioReplayCount,
+      completed: true,
+      abandoned: false,
+    });
+    setWrongChoiceId(null);
+    setSelectedPieceId(null);
+    setAttempts(Math.max(1, finalAttempts));
+    setActivityComplete(true);
+    if (activeActivity.domain === "english" && spokenLabel) {
+      speak(spokenLabel, "en-US");
+      window.setTimeout(() => speak(activeActivity.successText, "zh-CN", false), 750);
+    } else {
+      speak(activeActivity.successText, activeActivity.domain === "english" ? "en-US" : "zh-CN");
+    }
+  }
+
   function startActivity(activity: LearningActivity) {
-    setActiveActivity(activity);
+    setActiveActivity(withSessionVariant(activity));
     setAttempts(0);
     setWrongChoiceId(null);
     setRevealedAnswer(false);
     setActivityComplete(false);
+    setPlacements({});
+    setCountedIds([]);
+    setSelectedPieceId(null);
+    setDragVisual(null);
+    setAudioReplayCount(0);
     startedAt.current = Date.now();
     window.setTimeout(() => speak(activity.spokenInstruction, activity.speechLang), 180);
+  }
+
+  function replayInstruction() {
+    if (!activeActivity) return;
+    setAudioReplayCount((count) => count + 1);
+    speak(activeActivity.spokenInstruction, activeActivity.speechLang);
   }
 
   function chooseAnswer(choice: ActivityChoice) {
@@ -370,27 +483,7 @@ export default function HomePage() {
     const nextAttempts = attempts + 1;
     setAttempts(nextAttempts);
     if (choice.id === activeActivity.answerId) {
-      const durationSeconds = Math.max(5, Math.round((Date.now() - startedAt.current) / 1000));
-      const record: ActivityResult = {
-        activityId: activeActivity.id,
-        domain: activeActivity.domain,
-        date: dateKey,
-        correct: true,
-        attempts: nextAttempts,
-        durationSeconds,
-      };
-      setResults((items) => [
-        ...items.filter((item) => !(item.date === dateKey && item.activityId === activeActivity.id)),
-        record,
-      ]);
-      setWrongChoiceId(null);
-      setActivityComplete(true);
-      if (activeActivity.domain === "english") {
-        speak(choice.label, "en-US");
-        window.setTimeout(() => speak(activeActivity.successText, "zh-CN", false), 800);
-      } else {
-        speak(activeActivity.successText, "zh-CN");
-      }
+      finishActivity(nextAttempts, choice.label);
       return;
     }
 
@@ -399,12 +492,113 @@ export default function HomePage() {
     speak(nextAttempts >= 2 ? `${activeActivity.hint} 看看亮起来的那一个。` : activeActivity.hint, "zh-CN");
   }
 
+  function markInteractionWrong() {
+    if (!activeActivity) return;
+    const nextAttempts = attempts + 1;
+    setAttempts(nextAttempts);
+    speak(nextAttempts >= 2 ? `${activeActivity.hint} 再试一次。` : activeActivity.hint, "zh-CN");
+  }
+
+  function placePiece(pieceId: string, targetId: string) {
+    if (!activeActivity || activityComplete || placements[pieceId]) return;
+    const correctTargets = activeActivity.interaction?.correctTargets;
+    if (!correctTargets || correctTargets[pieceId] !== targetId) {
+      setSelectedPieceId(null);
+      markInteractionWrong();
+      return;
+    }
+
+    const nextPlacements = { ...placements, [pieceId]: targetId };
+    setPlacements(nextPlacements);
+    setSelectedPieceId(null);
+    const requiredIds = Object.keys(correctTargets);
+    if (requiredIds.every((id) => nextPlacements[id])) {
+      window.setTimeout(() => finishActivity(Math.max(1, attempts + 1)), 280);
+    } else {
+      const choice = activeActivity.choices.find((item) => item.id === pieceId);
+      if (choice) speak(choice.label, activeActivity.speechLang, false);
+    }
+  }
+
+  function tapCountItem(pieceId: string) {
+    if (!activeActivity || countedIds.includes(pieceId) || activityComplete) return;
+    const goal = activeActivity.interaction?.countGoal ?? activeActivity.choices.length;
+    const nextIds = [...countedIds, pieceId];
+    setCountedIds(nextIds);
+    speak(String(nextIds.length), "zh-CN", false);
+    if (nextIds.length >= goal) {
+      window.setTimeout(() => finishActivity(1), 420);
+    }
+  }
+
+  function startPieceDrag(event: ReactPointerEvent<HTMLButtonElement>, pieceId: string) {
+    if (placements[pieceId]) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragStart.current = {
+      id: pieceId,
+      x: event.clientX,
+      y: event.clientY,
+      pointerId: event.pointerId,
+      moved: false,
+    };
+    setDragVisual({ id: pieceId, x: 0, y: 0, moved: false });
+  }
+
+  function movePieceDrag(event: ReactPointerEvent<HTMLButtonElement>) {
+    const current = dragStart.current;
+    if (!current || current.pointerId !== event.pointerId) return;
+    const x = event.clientX - current.x;
+    const y = event.clientY - current.y;
+    const moved = current.moved || Math.hypot(x, y) > 8;
+    current.moved = moved;
+    setDragVisual({ id: current.id, x, y, moved });
+  }
+
+  function endPieceDrag(event: ReactPointerEvent<HTMLButtonElement>) {
+    const current = dragStart.current;
+    if (!current || current.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (current.moved) {
+      const target = document
+        .elementFromPoint(event.clientX, event.clientY)
+        ?.closest<HTMLElement>("[data-drop-target]");
+      const targetId = target?.dataset.dropTarget;
+      if (targetId) placePiece(current.id, targetId);
+    } else {
+      setSelectedPieceId((selected) => (selected === current.id ? null : current.id));
+    }
+    dragStart.current = null;
+    setDragVisual(null);
+  }
+
   function closeActivity() {
     window.speechSynthesis?.cancel();
+    if (activeActivity && !activityComplete && Date.now() - startedAt.current > 2500) {
+      saveActivityResult({
+        activityId: activeActivity.id,
+        domain: activeActivity.domain,
+        date: dateKey,
+        correct: false,
+        attempts,
+        durationSeconds: Math.max(3, Math.round((Date.now() - startedAt.current) / 1000)),
+        template: activityTemplate(activeActivity),
+        firstTryCorrect: false,
+        hintLevelUsed: attempts >= 2 ? 2 : attempts >= 1 ? 1 : 0,
+        audioReplayCount,
+        completed: false,
+        abandoned: true,
+      });
+    }
     setActiveActivity(null);
     setActivityComplete(false);
     setWrongChoiceId(null);
     setRevealedAnswer(false);
+    setPlacements({});
+    setCountedIds([]);
+    setSelectedPieceId(null);
+    setDragVisual(null);
   }
 
   function nextActivity() {
@@ -456,6 +650,7 @@ export default function HomePage() {
   }
 
   const firstUnfinished = plan.activities.find((activity) => !completedIds.has(activity.id)) ?? plan.activities[0];
+  const activeTemplate = activeActivity ? activityTemplate(activeActivity) : null;
 
   return (
     <main className={`product-shell ${profile.reduceMotion ? "reduce-motion" : ""}`}>
@@ -648,7 +843,7 @@ export default function HomePage() {
                   return (
                     <div className="observation-row" key={result.activityId}>
                       <span className={`result-domain result-${result.domain}`}>{DOMAIN_META[result.domain].shortTitle}</span>
-                      <div><strong>{activity?.skill || "新的发现"}</strong><p>{result.attempts === 1 ? "第一次就找到了答案。" : `尝试了 ${result.attempts} 次，在提示后完成。`} 用时约 {result.durationSeconds} 秒。</p></div>
+                      <div><strong>{activity?.skill || "新的发现"}</strong><p>{result.abandoned ? "玩到一半先休息了，没有关系。" : (result.firstTryCorrect ?? result.attempts === 1) ? "独立完成了这次发现。" : `尝试了 ${result.attempts} 次，在提示后完成。`} 用时约 {result.durationSeconds} 秒。</p></div>
                     </div>
                   );
                 }) : <div className="empty-observation"><Moon size={27} /><p>今天还没有开始。等玩过以后，这里会出现真实观察。</p></div>}
@@ -705,7 +900,14 @@ export default function HomePage() {
                 <span className="learning-domain-label">{DOMAIN_META[activeActivity.domain].title}</span>
                 <small>{activeActivity.skill}</small>
                 <h2 id="learning-title">{activeActivity.instruction}</h2>
-                <button className="listen-again" onClick={() => speak(activeActivity.spokenInstruction, activeActivity.speechLang)}><Volume2 size={21} />再听一次</button>
+                <button className="listen-again" onClick={replayInstruction}><Volume2 size={21} />再听一次</button>
+
+                {activeActivity.interaction?.storyText && (
+                  <div className="story-board">
+                    <BookOpen size={22} />
+                    <div>{activeActivity.interaction.storyText.map((line, index) => <span key={`${line}-${index}`}>{line}</span>)}</div>
+                  </div>
+                )}
 
                 {activeActivity.sceneIcons && (
                   <div className={`scene-board scene-${activeActivity.kind}`}>
@@ -713,18 +915,88 @@ export default function HomePage() {
                     {activeActivity.sceneLabel && <small>{activeActivity.sceneLabel}</small>}
                   </div>
                 )}
-                {!activeActivity.sceneIcons && <div className="prompt-mascot"><LittleExplorer compact /><span>慢慢看，不着急</span></div>}
+                {!activeActivity.sceneIcons && !activeActivity.interaction?.storyText && <div className="prompt-mascot"><LittleExplorer compact /><span>慢慢看，不着急</span></div>}
               </div>
 
               <div className="choice-area">
-                <div className="choice-grid">
-                  {activeActivity.choices.map((choice) => {
-                    let state: "idle" | "wrong" | "correct" | "revealed" = "idle";
-                    if (wrongChoiceId === choice.id) state = "wrong";
-                    if (revealedAnswer && choice.id === activeActivity.answerId) state = "revealed";
-                    return <ChoiceCard key={choice.id} choice={choice} state={state} onClick={() => chooseAnswer(choice)} />;
-                  })}
-                </div>
+                {(activeTemplate === "tap_choose" || activeTemplate === "story_choice") && (
+                  <div className="choice-grid">
+                    {activeActivity.choices.map((choice) => {
+                      let state: "idle" | "wrong" | "correct" | "revealed" = "idle";
+                      if (wrongChoiceId === choice.id) state = "wrong";
+                      if (revealedAnswer && choice.id === activeActivity.answerId) state = "revealed";
+                      return <ChoiceCard key={choice.id} choice={choice} state={state} onClick={() => chooseAnswer(choice)} />;
+                    })}
+                  </div>
+                )}
+
+                {activeTemplate === "tap_count" && (
+                  <div className="count-workspace">
+                    <div className="count-status"><strong>{countedIds.length}</strong><span>/ {activeActivity.interaction?.countGoal ?? activeActivity.choices.length}</span><small>已经点亮</small></div>
+                    <div className="count-piece-grid">
+                      {activeActivity.choices.map((choice) => {
+                        const counted = countedIds.includes(choice.id);
+                        return (
+                          <button key={choice.id} className={`count-piece choice-${choice.color} ${counted ? "counted" : ""}`} disabled={counted} onClick={() => tapCountItem(choice.id)} aria-label={`${counted ? "已经数过" : "点数"}${choice.label}`}>
+                            <ActivityIcon icon={choice.icon} size={54} strokeWidth={1.9} />
+                            {counted && <span><Check size={17} strokeWidth={3} /></span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p>点一个，数一个</p>
+                  </div>
+                )}
+
+                {activeTemplate && DRAG_TEMPLATES.has(activeTemplate) && (
+                  <div className={`drag-workspace drag-${activeTemplate}`}>
+                    <div className="drop-target-grid">
+                      {activeActivity.interaction?.targets?.map((target) => {
+                        const placedChoices = activeActivity.choices.filter((choice) => placements[choice.id] === target.id);
+                        return (
+                          <button
+                            type="button"
+                            key={target.id}
+                            data-drop-target={target.id}
+                            className={`drop-target target-${target.color} ${selectedPieceId ? "ready" : ""}`}
+                            onClick={() => selectedPieceId && placePiece(selectedPieceId, target.id)}
+                          >
+                            <span className="target-heading">{target.icon && <ActivityIcon icon={target.icon} size={31} strokeWidth={1.9} />}<strong>{target.label}</strong></span>
+                            {target.helper && <small>{target.helper}</small>}
+                            <span className="placed-pieces">
+                              {placedChoices.map((choice) => <i key={choice.id} className={`scale-${choice.visualScale ?? "medium"}`}><ActivityIcon icon={choice.icon} size={32} strokeWidth={2} /></i>)}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div className="drag-piece-tray">
+                      {activeActivity.choices.filter((choice) => !placements[choice.id]).map((choice) => {
+                        const dragging = dragVisual?.id === choice.id;
+                        return (
+                          <button
+                            type="button"
+                            key={choice.id}
+                            className={`drag-piece choice-${choice.color} scale-${choice.visualScale ?? "medium"} ${selectedPieceId === choice.id ? "selected" : ""} ${dragging ? "is-dragging" : ""}`}
+                            style={dragging ? { transform: `translate3d(${dragVisual?.x ?? 0}px, ${dragVisual?.y ?? 0}px, 0)` } : undefined}
+                            aria-pressed={selectedPieceId === choice.id}
+                            onPointerDown={(event) => startPieceDrag(event, choice.id)}
+                            onPointerMove={movePieceDrag}
+                            onPointerUp={endPieceDrag}
+                            onPointerCancel={() => { dragStart.current = null; setDragVisual(null); }}
+                            onClick={(event) => { if (event.detail === 0) setSelectedPieceId((selected) => selected === choice.id ? null : choice.id); }}
+                          >
+                            <span><ActivityIcon icon={choice.icon} size={45} strokeWidth={1.9} /></span>
+                            <strong>{choice.label}</strong>
+                            {choice.helper && <small>{choice.helper}</small>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="drag-help">拖到上面，也可以先点一个，再点目标</p>
+                  </div>
+                )}
                 <div className={`gentle-hint ${attempts > 0 ? "visible" : ""}`}><Heart size={17} fill="currentColor" /><span>{attempts > 0 ? activeActivity.hint : "可以用小手慢慢找"}</span></div>
               </div>
             </section>

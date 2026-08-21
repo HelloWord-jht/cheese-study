@@ -1,5 +1,6 @@
 import {
   ACTIVITY_LIBRARY,
+  activityTemplate,
   createCuratedPlan,
   isInterestKey,
   localDateKey,
@@ -89,6 +90,8 @@ function validateSelection(value: DeepSeekSelection) {
   if (activities.some((activity) => !activity)) return null;
   const domains = new Set(activities.map((activity) => activity?.domain));
   if (domains.size !== 3) return null;
+  const templates = new Set(activities.map((activity) => activity && activityTemplate(activity)));
+  if (templates.size !== 3) return null;
   const parentTip = typeof value.parentTip === "string" ? value.parentTip.trim().slice(0, 100) : "";
   return { ids, parentTip };
 }
@@ -98,6 +101,8 @@ function buildPrompt(interests: InterestKey[], recentResults: ReturnType<typeof 
     id: activity.id,
     domain: activity.domain,
     skill: activity.skill,
+    template: activityTemplate(activity),
+    difficulty: activity.difficulty ?? 1,
     interests: activity.interests,
   }));
 
@@ -105,7 +110,7 @@ function buildPrompt(interests: InterestKey[], recentResults: ReturnType<typeof 
     {
       role: "system",
       content:
-        "你是一名谨慎的三岁幼儿启蒙课程编排助手。只从给定的人工审核活动中选择，不得生成新题目。输出必须是 json。每天恰好选择中文、数学、英语各一个活动，优先匹配兴趣，同时避免连续重复和难度突增。家长建议不超过45个汉字，具体、温和、可在线下完成，不评价聪明与否。",
+        "你是一名谨慎的三岁幼儿启蒙课程编排助手。只从给定的人工审核活动中选择，不得生成新题目。输出必须是 json。每天恰好选择中文、数学、英语各一个活动，并保证三个活动的 template 各不相同。优先匹配兴趣，同时避免连续重复和难度突增。家长建议不超过45个汉字，具体、温和、可在线下完成，不评价聪明与否。",
     },
     {
       role: "user",
